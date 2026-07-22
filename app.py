@@ -16,6 +16,7 @@ if "data_dict" not in st.session_state:
         "创业板指": None
     }
 
+# 🆕 新增：存储每个板块的昨日收盘价
 if "prev_close_dict" not in st.session_state:
     st.session_state.prev_close_dict = {
         "上证主板": None,
@@ -30,7 +31,7 @@ if "events" not in st.session_state:
         "事件描述": ["示例事件A", "示例事件B"]
     })
 
-# ---------- 2. 智能解析 Excel ----------
+# ---------- 2. 智能解析 Excel（强化版） ----------
 @st.cache_data
 def parse_uploaded_file(uploaded_file):
     """读取并解析上传的文件，自动忽略损坏的样式格式"""
@@ -103,26 +104,33 @@ def parse_uploaded_file(uploaded_file):
         st.error(f"❌ 文件解析失败: {e}")
         return None
 
-# ---------- 3. 计算收盘价和涨跌幅 ----------
+# ---------- 3. 计算收盘价和涨跌幅（基于昨日收盘） ----------
 def get_index_summary(data_df, prev_close):
+    """
+    从分时数据中提取收盘价，并基于昨日收盘价计算涨跌幅
+    - data_df: 分时数据
+    - prev_close: 昨日收盘价（用户输入）
+    """
     if data_df is None or data_df.empty:
-        return None, None, None, None, None
+        return None, None, None, None
     
-    close_price = data_df['价格'].iloc[-1]
-    open_price = data_df['价格'].iloc[0]
+    close_price = data_df['价格'].iloc[-1]      # 今日收盘价
+    open_price = data_df['价格'].iloc[0]       # 今日开盘价
     
+    # 如果用户输入了昨日收盘价，用它计算涨跌幅；否则用今日开盘价估算
     if prev_close is not None and prev_close > 0:
         change_pct = ((close_price - prev_close) / prev_close) * 100
         used_prev = prev_close
         calc_method = "昨日收盘"
     else:
+        # 回退方案：用今日开盘价估算（接近真实值，但不完全准确）
         change_pct = ((close_price - open_price) / open_price) * 100 if open_price != 0 else None
         used_prev = open_price
         calc_method = "开盘价（估算）"
     
     return close_price, change_pct, open_price, used_prev, calc_method
 
-# ---------- 4. 核心绘图函数（支持跳过休盘） ----------
+# ---------- 4. 核心绘图函数 ----------
 def draw_chart(data_df, events_df, index_name):
     if data_df is None or data_df.empty:
         fig = go.Figure()
@@ -130,22 +138,6 @@ def draw_chart(data_df, events_df, index_name):
         fig.update_layout(height=500)
         return fig
 
-    # ---------- 将数据拆分为上午和下午 ----------
-    def time_to_min(t):
-        try:
-            h, m = map(int, t.split(':'))
-            return h*60 + m
-        except:
-            return 0
-
-    data_df['分钟'] = data_df['时间'].apply(time_to_min)
-    morning = data_df[data_df['分钟'] <= 690]       # 11:30 = 690分钟
-    afternoon = data_df[data_df['分钟'] >= 780]     # 13:00 = 780分钟
-
-    # 如果没有下午数据，则只绘制上午
-    # 如果没有上午数据（理论上不会），则只绘制下午
-
-    # ---------- 创建子图 ----------
     fig = make_subplots(
         rows=2, cols=1,
         shared_xaxes=True,
@@ -154,52 +146,24 @@ def draw_chart(data_df, events_df, index_name):
         subplot_titles=(f"{index_name} 指数走势", "成交量")
     )
 
-    # ---------- 指数折线 ----------
-    # 上午
     fig.add_trace(
         go.Scatter(
-            x=morning['时间'], y=morning['价格'],
+            x=data_df['时间'], y=data_df['价格'],
             mode='lines', name='指数点位',
             line=dict(color='#ff4d4f', width=2.5),
             fill='tozeroy', fillcolor='rgba(255,77,79,0.1)'
         ),
         row=1, col=1
     )
-    # 下午（如果有）
-    if not afternoon.empty:
-        fig.add_trace(
-            go.Scatter(
-                x=afternoon['时间'], y=afternoon['价格'],
-                mode='lines', name='指数点位',
-                line=dict(color='#ff4d4f', width=2.5),
-                fill='tozeroy', fillcolor='rgba(255,77,79,0.1)',
-                showlegend=False  # 不重复图例
-            ),
-            row=1, col=1
-        )
 
-    # ---------- 成交量柱状 ----------
-    # 上午
     fig.add_trace(
         go.Bar(
-            x=morning['时间'], y=morning['成交量'],
-            name='成交量', marker_color='#3b82f6', opacity=0.7,
-            offsetgroup=0
+            x=data_df['时间'], y=data_df['成交量'],
+            name='成交量', marker_color='#3b82f6', opacity=0.7
         ),
         row=2, col=1
     )
-    # 下午（如果有）
-    if not afternoon.empty:
-        fig.add_trace(
-            go.Bar(
-                x=afternoon['时间'], y=afternoon['成交量'],
-                name='成交量', marker_color='#3b82f6', opacity=0.7,
-                showlegend=False, offsetgroup=0
-            ),
-            row=2, col=1
-        )
 
-    # ---------- 事件标记（不受分段影响） ----------
     if events_df is not None and not events_df.empty:
         for _, event in events_df.iterrows():
             event_time = str(event['时间']).strip()
@@ -213,7 +177,6 @@ def draw_chart(data_df, events_df, index_name):
                     row=1, col=1
                 )
 
-    # ---------- 全局布局 ----------
     fig.update_layout(
         height=520, hovermode='x unified',
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
@@ -223,7 +186,6 @@ def draw_chart(data_df, events_df, index_name):
         margin=dict(l=20, r=20, t=40, b=20)
     )
 
-    # 纵坐标自动适配
     if not data_df.empty:
         min_price = data_df['价格'].min()
         max_price = data_df['价格'].max()
@@ -239,7 +201,7 @@ def draw_chart(data_df, events_df, index_name):
 st.markdown("<h1 style='color:#e8edf5; border-left: 4px solid #ff4d4f; padding-left: 16px;'>📈 多板块分时图分析器 <span style='font-size:16px; color:#7a8ba3;'>上传数据 · 点击切换板块</span></h1>", unsafe_allow_html=True)
 
 # ============================================================
-# 📊 今日指数概览（含昨日收盘价输入）
+# 📊 今日指数概览（含昨日收盘价输入框）
 # ============================================================
 st.markdown("### 📊 今日指数概览")
 cols_overview = st.columns(4)
@@ -247,16 +209,20 @@ cols_overview = st.columns(4)
 for i, (col, key) in enumerate(zip(cols_overview, st.session_state.data_dict.keys())):
     with col:
         data = st.session_state.data_dict.get(key)
+        # 获取该板块当前的昨日收盘价
         current_prev = st.session_state.prev_close_dict.get(key, None)
         
+        # --- 显示数据卡片 ---
         if data is not None and not data.empty:
             close_price = data['价格'].iloc[-1]
             open_price = data['价格'].iloc[0]
             
+            # 计算涨跌幅（基于昨日收盘，如果用户输入了的话）
             if current_prev is not None and current_prev > 0:
                 change_pct = ((close_price - current_prev) / current_prev) * 100
                 calc_label = f"昨收 {current_prev:.2f}"
             else:
+                # 未输入昨日收盘，使用开盘价估算
                 change_pct = ((close_price - open_price) / open_price) * 100 if open_price != 0 else None
                 calc_label = "⚠️ 请输昨收"
             
@@ -264,6 +230,7 @@ for i, (col, key) in enumerate(zip(cols_overview, st.session_state.data_dict.key
             arrow = "▲" if (change_pct is not None and change_pct >= 0) else "▼"
             change_display = f"{arrow} {abs(change_pct):.2f}%" if change_pct is not None else "N/A"
             
+            # 卡片主体
             st.markdown(f"""
             <div style="background: rgba(255,255,255,0.04); border-radius: 12px; padding: 12px 14px; border: 1px solid #1e2a3a;">
                 <div style="color: #7a8ba3; font-size: 13px; font-weight: 500;">{key}</div>
@@ -273,6 +240,7 @@ for i, (col, key) in enumerate(zip(cols_overview, st.session_state.data_dict.key
             </div>
             """, unsafe_allow_html=True)
             
+            # 🆕 昨日收盘价输入框（放卡片下方，与卡片融为一体）
             prev_input = st.number_input(
                 "昨日收盘",
                 value=None if current_prev is None else float(current_prev),
@@ -283,10 +251,14 @@ for i, (col, key) in enumerate(zip(cols_overview, st.session_state.data_dict.key
                 placeholder="输入昨收",
                 help="输入昨日收盘价，用于精确计算涨跌幅"
             )
+            
+            # 更新 session_state
             if prev_input != current_prev:
                 st.session_state.prev_close_dict[key] = prev_input if prev_input is not None and prev_input > 0 else None
                 st.rerun()
+                
         else:
+            # 未上传数据时显示占位
             st.markdown(f"""
             <div style="background: rgba(255,255,255,0.02); border-radius: 12px; padding: 12px 14px; border: 1px dashed #2a3a4a;">
                 <div style="color: #7a8ba3; font-size: 13px;">{key}</div>
