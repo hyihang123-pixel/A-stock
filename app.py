@@ -8,7 +8,6 @@ import warnings
 st.set_page_config(page_title="📈 多板块分时图分析器 Pro", page_icon="📊", layout="wide")
 
 # ---------- 1. 初始化 Session State ----------
-# 核心改动：用字典存储四个板块的数据
 if "data_dict" not in st.session_state:
     st.session_state.data_dict = {
         "上证主板": None,
@@ -23,7 +22,7 @@ if "events" not in st.session_state:
         "事件描述": ["示例事件A", "示例事件B"]
     })
 
-# ---------- 2. 智能解析 Excel（强化版，自动忽略样式错误） ----------
+# ---------- 2. 智能解析 Excel（强化版） ----------
 @st.cache_data
 def parse_uploaded_file(uploaded_file):
     """读取并解析上传的文件，自动忽略损坏的样式格式"""
@@ -31,24 +30,18 @@ def parse_uploaded_file(uploaded_file):
         if uploaded_file.name.endswith('.csv'):
             df = pd.read_csv(uploaded_file, encoding='gbk')
         else:
-            # 正常读取（先试一下）
             try:
                 df = pd.read_excel(uploaded_file, engine='openpyxl')
             except Exception as e:
-                # 如果报错且包含 "NamedCellStyle"（样式错误），则启动“只读裸奔模式”
                 if 'NamedCellStyle' in str(e):
                     from openpyxl import load_workbook
                     warnings.filterwarnings('ignore')
-                    
-                    # 关键：read_only=True 会跳过样式解析，data_only=True 拿数值
                     wb = load_workbook(uploaded_file, data_only=True, read_only=True)
                     ws = wb.active
-                    
                     data_rows = list(ws.values)
                     if not data_rows:
                         st.error("❌ Excel 中无数据")
                         return None
-                    
                     columns = data_rows[0]
                     values = data_rows[1:]
                     df = pd.DataFrame(values, columns=columns)
@@ -59,7 +52,6 @@ def parse_uploaded_file(uploaded_file):
         if df.empty:
             return None
 
-        # ---------- 智能列名匹配 ----------
         cols = df.columns.tolist()
         time_col, price_col, vol_col = None, None, None
         for col in cols:
@@ -103,9 +95,23 @@ def parse_uploaded_file(uploaded_file):
         st.error(f"❌ 文件解析失败: {e}")
         return None
 
-# ---------- 3. 核心绘图函数 ----------
+# ---------- 3. 计算收盘价和涨跌幅 ----------
+def get_index_summary(data_df):
+    """从分时数据中提取收盘价和涨跌幅（基于首尾价格估算）"""
+    if data_df is None or data_df.empty:
+        return None, None, None
+    
+    # 收盘价 = 最后一行的价格
+    close_price = data_df['价格'].iloc[-1]
+    # 开盘价 = 第一行的价格
+    open_price = data_df['价格'].iloc[0]
+    # 涨跌幅 = (收盘价 - 开盘价) / 开盘价 * 100
+    change_pct = ((close_price - open_price) / open_price) * 100 if open_price != 0 else None
+    
+    return close_price, change_pct, open_price
+
+# ---------- 4. 核心绘图函数 ----------
 def draw_chart(data_df, events_df, index_name):
-    """使用 Plotly 绘制双轴分时图 + 事件标记"""
     if data_df is None or data_df.empty:
         fig = go.Figure()
         fig.add_annotation(text=f"请上传 {index_name} 数据", x=0.5, y=0.5, showarrow=False, font=dict(size=20, color="gray"))
@@ -120,7 +126,6 @@ def draw_chart(data_df, events_df, index_name):
         subplot_titles=(f"{index_name} 指数走势", "成交量")
     )
 
-    # 指数折线
     fig.add_trace(
         go.Scatter(
             x=data_df['时间'], y=data_df['价格'],
@@ -131,7 +136,6 @@ def draw_chart(data_df, events_df, index_name):
         row=1, col=1
     )
 
-    # 成交量柱状
     fig.add_trace(
         go.Bar(
             x=data_df['时间'], y=data_df['成交量'],
@@ -140,7 +144,6 @@ def draw_chart(data_df, events_df, index_name):
         row=2, col=1
     )
 
-    # 事件标记
     if events_df is not None and not events_df.empty:
         for _, event in events_df.iterrows():
             event_time = str(event['时间']).strip()
@@ -163,7 +166,6 @@ def draw_chart(data_df, events_df, index_name):
         margin=dict(l=20, r=20, t=40, b=20)
     )
 
-    # 纵坐标范围：为了看清走势，根据数据自动调整，留出上下边距
     if not data_df.empty:
         min_price = data_df['价格'].min()
         max_price = data_df['价格'].max()
@@ -175,17 +177,52 @@ def draw_chart(data_df, events_df, index_name):
 
     return fig
 
-# ---------- 4. 页面UI布局 ----------
+# ---------- 5. 页面UI布局 ----------
 st.markdown("<h1 style='color:#e8edf5; border-left: 4px solid #ff4d4f; padding-left: 16px;'>📈 多板块分时图分析器 <span style='font-size:16px; color:#7a8ba3;'>上传数据 · 点击切换板块</span></h1>", unsafe_allow_html=True)
 
-# ---------- 第一行：四个上传区域（并排） ----------
+# ============================================================
+# 🆕 新增：今日指数概览面板（四个板块的收盘价和涨跌幅）
+# ============================================================
+st.markdown("### 📊 今日指数概览")
+cols_overview = st.columns(4)
+
+for i, (col, key) in enumerate(zip(cols_overview, st.session_state.data_dict.keys())):
+    with col:
+        data = st.session_state.data_dict.get(key)
+        close_price, change_pct, open_price = get_index_summary(data)
+        
+        if close_price is not None and change_pct is not None:
+            # 判断涨跌：红色涨，绿色跌
+            color = "#ff4d4f" if change_pct >= 0 else "#3ecf8e"
+            arrow = "▲" if change_pct >= 0 else "▼"
+            change_display = f"{arrow} {abs(change_pct):.2f}%"
+            
+            # 用卡片样式展示
+            st.markdown(f"""
+            <div style="background: rgba(255,255,255,0.04); border-radius: 12px; padding: 12px 16px; border: 1px solid #1e2a3a;">
+                <div style="color: #7a8ba3; font-size: 13px; font-weight: 500;">{key}</div>
+                <div style="color: #e8edf5; font-size: 22px; font-weight: 700;">{close_price:.2f}</div>
+                <div style="color: {color}; font-size: 15px; font-weight: 600;">{change_display}</div>
+                <div style="color: #4a5a6e; font-size: 11px;">开盘 {open_price:.2f}</div>
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+            st.markdown(f"""
+            <div style="background: rgba(255,255,255,0.02); border-radius: 12px; padding: 12px 16px; border: 1px dashed #2a3a4a;">
+                <div style="color: #7a8ba3; font-size: 13px;">{key}</div>
+                <div style="color: #4a5a6e; font-size: 16px; padding: 8px 0;">⏳ 等待上传</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+# ============================================================
+
+# ---------- 第一步：四个上传区域 ----------
 st.markdown("### 📤 第一步：分别上传四个板块的数据")
 cols_upload = st.columns(4)
 index_keys = list(st.session_state.data_dict.keys())
 
 for i, (col, key) in enumerate(zip(cols_upload, index_keys)):
     with col:
-        # 显示当前是否已上传的状态标记
         status = "✅" if st.session_state.data_dict[key] is not None else "⬜"
         st.markdown(f"**{status} {key}**")
         
@@ -193,7 +230,7 @@ for i, (col, key) in enumerate(zip(cols_upload, index_keys)):
             f"上传 {key} 数据",
             type=['xlsx', 'xls', 'csv'],
             label_visibility="collapsed",
-            key=f"upload_{key}"  # 每个上传器必须唯一 Key
+            key=f"upload_{key}"
         )
         
         if uploaded_file is not None:
@@ -205,28 +242,24 @@ for i, (col, key) in enumerate(zip(cols_upload, index_keys)):
                 st.session_state.data_dict[key] = None
                 st.error("解析失败")
 
-# ---------- 第二行：图表 + 右侧面板 ----------
+# ---------- 第二步：图表 + 右侧面板 ----------
 col_chart, col_right = st.columns([2.2, 1])
 
 with col_chart:
-    # 核心改动：使用 Tabs（标签页）作为“点击切换”的按钮
     st.markdown("### 📊 第二步：点击标签切换板块视图")
-    tabs = st.tabs(index_keys)  # 生成四个标签页按钮
+    tabs = st.tabs(index_keys)
     
-    # 循环填充每个标签页
     for tab, key in zip(tabs, index_keys):
         with tab:
             data = st.session_state.data_dict.get(key)
-            # 获取当前板块的事件（事件是全局共享的，也可以做成独立的，但通常市场事件通用）
             fig = draw_chart(data, st.session_state.events, key)
             st.plotly_chart(fig, width='stretch', use_container_width=True)
             
-            # 如果没数据，显示提示
             if data is None:
                 st.info(f"👆 请先在顶部上传 {key} 的 Excel 文件")
 
 with col_right:
-    # ---------- 热点事件管理（全局通用） ----------
+    # ---------- 热点事件管理 ----------
     st.subheader("⏱️ 热点事件 (全局)")
     edited_events = st.data_editor(
         st.session_state.events,
