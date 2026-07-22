@@ -320,35 +320,7 @@ def fetch_market_stats():
         result["success"] = False
         return result
 
-# ---------- 6. 异动检测 ----------
-def detect_anomalies(data_df):
-    if data_df is None or data_df.empty:
-        return []
-    
-    events = []
-    window = 5
-    for i in range(window, len(data_df)):
-        price_change = (data_df['价格'].iloc[i] - data_df['价格'].iloc[i-window]) / data_df['价格'].iloc[i-window]
-        vol_avg = data_df['成交量'].iloc[i-window:i].mean()
-        vol_spike = data_df['成交量'].iloc[i] > vol_avg * 3 if vol_avg > 0 else False
-        
-        if price_change > 0.005:
-            events.append({"时间": data_df['时间'].iloc[i], "事件描述": f"📈 快速拉升 {price_change*100:.2f}%", "type": "up"})
-        elif price_change < -0.005:
-            events.append({"时间": data_df['时间'].iloc[i], "事件描述": f"📉 快速跳水 {price_change*100:.2f}%", "type": "down"})
-        if vol_spike:
-            events.append({"时间": data_df['时间'].iloc[i], "事件描述": f"🔊 成交量异常放大", "type": "volume"})
-    
-    # 去重
-    unique_events = []
-    seen_times = set()
-    for e in reversed(events):
-        if e["时间"] not in seen_times:
-            unique_events.append(e)
-            seen_times.add(e["时间"])
-    return list(reversed(unique_events))
-
-# ---------- 7. DeepSeek AI 生成事件 ----------
+# ---------- 6. DeepSeek AI 生成事件（基于上传的数据分析） ----------
 def generate_events_with_deepseek(data_df, events_df, api_key):
     try:
         from openai import OpenAI
@@ -388,7 +360,7 @@ def generate_events_with_deepseek(data_df, events_df, api_key):
         st.warning(f"AI生成事件失败: {e}")
         return events_df
 
-# ---------- 8. 页面UI ----------
+# ---------- 7. 页面UI ----------
 st.markdown("<h1 style='color:#e8edf5; border-left: 4px solid #ff4d4f; padding-left: 16px;'>📈 多板块分时图分析器 <span style='font-size:16px; color:#7a8ba3;'>手动上传 · 自动统计</span></h1>", unsafe_allow_html=True)
 
 # ----- 设置栏 -----
@@ -492,14 +464,7 @@ for i, (col, key) in enumerate(zip(cols_upload, index_keys)):
             if df is not None:
                 st.session_state.data_dict[key] = df
                 st.success(f"✅ {len(df)} 条数据")
-                # 自动检测异动
-                if len(df) > 10:
-                    anomalies = detect_anomalies(df)
-                    if anomalies:
-                        new_events = pd.DataFrame(anomalies)[['时间', '事件描述']]
-                        combined = pd.concat([st.session_state.events, new_events]).drop_duplicates(subset=['时间'], keep='first')
-                        st.session_state.events = combined
-                        st.info(f"🔔 检测到 {len(anomalies)} 个异动事件")
+                # ❌ 已删除：自动检测异动事件
             else:
                 st.session_state.data_dict[key] = None
                 st.error("解析失败")
@@ -521,7 +486,7 @@ with col_chart:
 with col_right:
     st.subheader("⏱️ 热点事件")
     
-    # AI生成按钮
+    # AI生成按钮（基于上传的数据）
     if use_ai and st.button("🤖 AI生成事件"):
         if st.session_state.deepseek_api_key:
             first_data = next((d for d in st.session_state.data_dict.values() if d is not None), None)
@@ -550,7 +515,7 @@ with col_right:
     if not edited_events.equals(st.session_state.events):
         st.session_state.events = edited_events
         st.rerun()
-    st.caption("💡 手动添加/编辑/删除事件")
+    st.caption("💡 手动添加/编辑/删除事件 | AI生成基于上传的分时数据")
 
     st.markdown("---")
     st.subheader("📊 市场统计")
