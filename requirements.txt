@@ -2,3 +2,6 @@ streamlit
 pandas
 plotly
 openpyxl
+akshare
+levistock
+openai
