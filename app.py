@@ -123,7 +123,7 @@ def draw_chart(data_df, events_df):
     )
 
     # ------------------ 修改：指数纵坐标范围固定为 3000~4000 ------------------
-    fig.update_yaxes(title_text="点位", row=1, col=1, range=[3000, 4000])
+    fig.update_yaxes(title_text="点位", row=1, col=1, range=[3800, 4000])
     # -------------------------------------------------------------------------
     fig.update_yaxes(title_text="成交量", row=2, col=1)
     fig.update_xaxes(title_text="时间", row=2, col=1, tickangle=45, tickfont=dict(size=10))
