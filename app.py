@@ -3,30 +3,63 @@ import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from datetime import datetime
+import warnings
 
-st.set_page_config(page_title="📈 分时图分析器 Pro", page_icon="📊", layout="wide")
+st.set_page_config(page_title="📈 多板块分时图分析器 Pro", page_icon="📊", layout="wide")
 
-# ---------- 初始化 Session State ----------
+# ---------- 1. 初始化 Session State ----------
+# 核心改动：用字典存储四个板块的数据
+if "data_dict" not in st.session_state:
+    st.session_state.data_dict = {
+        "上证主板": None,
+        "深圳主板": None,
+        "科创综指": None,
+        "创业板指": None
+    }
+
 if "events" not in st.session_state:
     st.session_state.events = pd.DataFrame({
         "时间": ["09:40", "10:30"],
         "事件描述": ["示例事件A", "示例事件B"]
     })
-if "uploaded_data" not in st.session_state:
-    st.session_state.uploaded_data = None
-if "file_name" not in st.session_state:
-    st.session_state.file_name = "未上传"
 
-# ---------- 智能解析 Excel ----------
+# ---------- 2. 智能解析 Excel（强化版，自动忽略样式错误） ----------
 @st.cache_data
 def parse_uploaded_file(uploaded_file):
+    """读取并解析上传的文件，自动忽略损坏的样式格式"""
     try:
         if uploaded_file.name.endswith('.csv'):
             df = pd.read_csv(uploaded_file, encoding='gbk')
         else:
-            df = pd.read_excel(uploaded_file, engine='openpyxl')
+            # 正常读取（先试一下）
+            try:
+                df = pd.read_excel(uploaded_file, engine='openpyxl')
+            except Exception as e:
+                # 如果报错且包含 "NamedCellStyle"（样式错误），则启动“只读裸奔模式”
+                if 'NamedCellStyle' in str(e):
+                    from openpyxl import load_workbook
+                    warnings.filterwarnings('ignore')
+                    
+                    # 关键：read_only=True 会跳过样式解析，data_only=True 拿数值
+                    wb = load_workbook(uploaded_file, data_only=True, read_only=True)
+                    ws = wb.active
+                    
+                    data_rows = list(ws.values)
+                    if not data_rows:
+                        st.error("❌ Excel 中无数据")
+                        return None
+                    
+                    columns = data_rows[0]
+                    values = data_rows[1:]
+                    df = pd.DataFrame(values, columns=columns)
+                    wb.close()
+                else:
+                    raise e
+        
         if df.empty:
             return None
+
+        # ---------- 智能列名匹配 ----------
         cols = df.columns.tolist()
         time_col, price_col, vol_col = None, None, None
         for col in cols:
@@ -37,15 +70,18 @@ def parse_uploaded_file(uploaded_file):
                 price_col = col
             elif '成交' in col_lower or 'volume' in col_lower or '量' in col_lower:
                 vol_col = col
+
         if time_col is None and len(cols) >= 1:
             time_col = cols[0]
         if price_col is None and len(cols) >= 2:
             price_col = cols[1]
         if vol_col is None and len(cols) >= 3:
             vol_col = cols[2]
+
         if time_col is None or price_col is None:
             st.error("❌ 无法识别列：请确保包含'时间'和'收盘价'列")
             return None
+
         result_df = pd.DataFrame()
         result_df['时间'] = df[time_col].astype(str).str.strip()
         result_df['价格'] = pd.to_numeric(df[price_col], errors='coerce')
@@ -53,21 +89,26 @@ def parse_uploaded_file(uploaded_file):
             result_df['成交量'] = pd.to_numeric(df[vol_col], errors='coerce').fillna(0)
         else:
             result_df['成交量'] = 0
+
         result_df = result_df.dropna(subset=['价格'])
         result_df = result_df[result_df['时间'].str.contains(':', na=False)]
+
         if result_df.empty:
             st.error("❌ 解析后无有效数据，请确认时间格式为 HH:MM")
             return None
+
         return result_df
+
     except Exception as e:
         st.error(f"❌ 文件解析失败: {e}")
         return None
 
-# ---------- 核心绘图函数（修改点在此） ----------
-def draw_chart(data_df, events_df):
+# ---------- 3. 核心绘图函数 ----------
+def draw_chart(data_df, events_df, index_name):
+    """使用 Plotly 绘制双轴分时图 + 事件标记"""
     if data_df is None or data_df.empty:
         fig = go.Figure()
-        fig.add_annotation(text="请上传数据", x=0.5, y=0.5, showarrow=False, font=dict(size=20, color="gray"))
+        fig.add_annotation(text=f"请上传 {index_name} 数据", x=0.5, y=0.5, showarrow=False, font=dict(size=20, color="gray"))
         fig.update_layout(height=500)
         return fig
 
@@ -76,7 +117,7 @@ def draw_chart(data_df, events_df):
         shared_xaxes=True,
         vertical_spacing=0.08,
         row_heights=[0.65, 0.35],
-        subplot_titles=("指数走势", "成交量")
+        subplot_titles=(f"{index_name} 指数走势", "成交量")
     )
 
     # 指数折线
@@ -122,50 +163,75 @@ def draw_chart(data_df, events_df):
         margin=dict(l=20, r=20, t=40, b=20)
     )
 
-    # ------------------ 修改：指数纵坐标范围固定为 3000~4000 ------------------
-    fig.update_yaxes(title_text="点位", row=1, col=1, range=[3800, 3900])
-    # -------------------------------------------------------------------------
+    # 纵坐标范围：为了看清走势，根据数据自动调整，留出上下边距
+    if not data_df.empty:
+        min_price = data_df['价格'].min()
+        max_price = data_df['价格'].max()
+        padding = (max_price - min_price) * 0.1 if max_price > min_price else 10
+        fig.update_yaxes(title_text="点位", row=1, col=1, range=[min_price - padding, max_price + padding])
+    
     fig.update_yaxes(title_text="成交量", row=2, col=1)
     fig.update_xaxes(title_text="时间", row=2, col=1, tickangle=45, tickfont=dict(size=10))
 
     return fig
 
-# ---------- 页面UI布局 ----------
-st.markdown("<h1 style='color:#e8edf5; border-left: 4px solid #ff4d4f; padding-left: 16px;'>📈 分时图分析器 <span style='font-size:16px; color:#7a8ba3;'>上传Excel · 事件标注 · 统计看板</span></h1>", unsafe_allow_html=True)
+# ---------- 4. 页面UI布局 ----------
+st.markdown("<h1 style='color:#e8edf5; border-left: 4px solid #ff4d4f; padding-left: 16px;'>📈 多板块分时图分析器 <span style='font-size:16px; color:#7a8ba3;'>上传数据 · 点击切换板块</span></h1>", unsafe_allow_html=True)
 
-col1, col2 = st.columns([3, 1])
-with col1:
-    uploaded_file = st.file_uploader("点击上传 Excel / CSV 文件", type=['xlsx', 'xls', 'csv'], label_visibility="collapsed")
-    if uploaded_file is not None:
-        st.session_state.file_name = uploaded_file.name
-        df = parse_uploaded_file(uploaded_file)
-        if df is not None:
-            st.session_state.uploaded_data = df
-            st.success(f"✅ 已加载: {uploaded_file.name}，共 {len(df)} 条数据")
-        else:
-            st.session_state.uploaded_data = None
-with col2:
-    st.write("")
-    st.write("")
-    st.caption(f"📁 当前文件: {st.session_state.file_name}")
+# ---------- 第一行：四个上传区域（并排） ----------
+st.markdown("### 📤 第一步：分别上传四个板块的数据")
+cols_upload = st.columns(4)
+index_keys = list(st.session_state.data_dict.keys())
 
+for i, (col, key) in enumerate(zip(cols_upload, index_keys)):
+    with col:
+        # 显示当前是否已上传的状态标记
+        status = "✅" if st.session_state.data_dict[key] is not None else "⬜"
+        st.markdown(f"**{status} {key}**")
+        
+        uploaded_file = st.file_uploader(
+            f"上传 {key} 数据",
+            type=['xlsx', 'xls', 'csv'],
+            label_visibility="collapsed",
+            key=f"upload_{key}"  # 每个上传器必须唯一 Key
+        )
+        
+        if uploaded_file is not None:
+            df = parse_uploaded_file(uploaded_file)
+            if df is not None:
+                st.session_state.data_dict[key] = df
+                st.success(f"✅ {len(df)} 条数据")
+            else:
+                st.session_state.data_dict[key] = None
+                st.error("解析失败")
+
+# ---------- 第二行：图表 + 右侧面板 ----------
 col_chart, col_right = st.columns([2.2, 1])
 
 with col_chart:
-    if st.session_state.uploaded_data is not None:
-        fig = draw_chart(st.session_state.uploaded_data, st.session_state.events)
-        st.plotly_chart(fig, width='stretch')   # 已更新为新语法
-    else:
-        st.info("👆 请上传 Excel 数据文件，图表将自动呈现")
-        fig = draw_chart(None, None)
-        st.plotly_chart(fig, width='stretch')   # 已更新为新语法
+    # 核心改动：使用 Tabs（标签页）作为“点击切换”的按钮
+    st.markdown("### 📊 第二步：点击标签切换板块视图")
+    tabs = st.tabs(index_keys)  # 生成四个标签页按钮
+    
+    # 循环填充每个标签页
+    for tab, key in zip(tabs, index_keys):
+        with tab:
+            data = st.session_state.data_dict.get(key)
+            # 获取当前板块的事件（事件是全局共享的，也可以做成独立的，但通常市场事件通用）
+            fig = draw_chart(data, st.session_state.events, key)
+            st.plotly_chart(fig, width='stretch', use_container_width=True)
+            
+            # 如果没数据，显示提示
+            if data is None:
+                st.info(f"👆 请先在顶部上传 {key} 的 Excel 文件")
 
 with col_right:
-    st.subheader("⏱️ 热点事件")
+    # ---------- 热点事件管理（全局通用） ----------
+    st.subheader("⏱️ 热点事件 (全局)")
     edited_events = st.data_editor(
         st.session_state.events,
         num_rows="dynamic",
-        width='stretch',                        # 已更新为新语法
+        width='stretch',
         column_config={
             "时间": st.column_config.TextColumn("时间", help="格式: 09:30"),
             "事件描述": st.column_config.TextColumn("事件描述", help="输入热点事件")
@@ -177,8 +243,10 @@ with col_right:
         st.rerun()
     st.caption("💡 点击表格下方 '添加行' 增加事件，删除行会自动移除")
 
+    # ---------- 底部统计信息 ----------
     st.markdown("---")
     st.subheader("📊 市场统计")
+    
     col_s1, col_s2 = st.columns(2)
     with col_s1:
         turnover = st.text_input("成交额（亿元）", placeholder="27182.89", key="stat_turnover")
@@ -186,8 +254,10 @@ with col_right:
     with col_s2:
         change = st.text_input("较前日增减", placeholder="+464.24", key="stat_change")
         down_cnt = st.text_input("下跌家数", placeholder="3710", key="stat_down")
+    
     sectors = st.text_input("涨幅居前板块", placeholder="油气 · 煤炭 · 白酒", key="stat_sectors")
 
+# ---------- 底部时间戳 ----------
 st.markdown("---")
 col_f1, col_f2 = st.columns([3, 1])
 with col_f1:
