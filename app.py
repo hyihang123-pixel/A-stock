@@ -16,6 +16,15 @@ if "data_dict" not in st.session_state:
         "创业板指": None
     }
 
+# 🆕 新增：存储每个板块的昨日收盘价
+if "prev_close_dict" not in st.session_state:
+    st.session_state.prev_close_dict = {
+        "上证主板": None,
+        "深圳主板": None,
+        "科创综指": None,
+        "创业板指": None
+    }
+
 if "events" not in st.session_state:
     st.session_state.events = pd.DataFrame({
         "时间": ["09:40", "10:30"],
@@ -95,20 +104,31 @@ def parse_uploaded_file(uploaded_file):
         st.error(f"❌ 文件解析失败: {e}")
         return None
 
-# ---------- 3. 计算收盘价和涨跌幅 ----------
-def get_index_summary(data_df):
-    """从分时数据中提取收盘价和涨跌幅（基于首尾价格估算）"""
+# ---------- 3. 计算收盘价和涨跌幅（基于昨日收盘） ----------
+def get_index_summary(data_df, prev_close):
+    """
+    从分时数据中提取收盘价，并基于昨日收盘价计算涨跌幅
+    - data_df: 分时数据
+    - prev_close: 昨日收盘价（用户输入）
+    """
     if data_df is None or data_df.empty:
-        return None, None, None
+        return None, None, None, None
     
-    # 收盘价 = 最后一行的价格
-    close_price = data_df['价格'].iloc[-1]
-    # 开盘价 = 第一行的价格
-    open_price = data_df['价格'].iloc[0]
-    # 涨跌幅 = (收盘价 - 开盘价) / 开盘价 * 100
-    change_pct = ((close_price - open_price) / open_price) * 100 if open_price != 0 else None
+    close_price = data_df['价格'].iloc[-1]      # 今日收盘价
+    open_price = data_df['价格'].iloc[0]       # 今日开盘价
     
-    return close_price, change_pct, open_price
+    # 如果用户输入了昨日收盘价，用它计算涨跌幅；否则用今日开盘价估算
+    if prev_close is not None and prev_close > 0:
+        change_pct = ((close_price - prev_close) / prev_close) * 100
+        used_prev = prev_close
+        calc_method = "昨日收盘"
+    else:
+        # 回退方案：用今日开盘价估算（接近真实值，但不完全准确）
+        change_pct = ((close_price - open_price) / open_price) * 100 if open_price != 0 else None
+        used_prev = open_price
+        calc_method = "开盘价（估算）"
+    
+    return close_price, change_pct, open_price, used_prev, calc_method
 
 # ---------- 4. 核心绘图函数 ----------
 def draw_chart(data_df, events_df, index_name):
@@ -181,7 +201,7 @@ def draw_chart(data_df, events_df, index_name):
 st.markdown("<h1 style='color:#e8edf5; border-left: 4px solid #ff4d4f; padding-left: 16px;'>📈 多板块分时图分析器 <span style='font-size:16px; color:#7a8ba3;'>上传数据 · 点击切换板块</span></h1>", unsafe_allow_html=True)
 
 # ============================================================
-# 🆕 新增：今日指数概览面板（四个板块的收盘价和涨跌幅）
+# 📊 今日指数概览（含昨日收盘价输入框）
 # ============================================================
 st.markdown("### 📊 今日指数概览")
 cols_overview = st.columns(4)
@@ -189,26 +209,58 @@ cols_overview = st.columns(4)
 for i, (col, key) in enumerate(zip(cols_overview, st.session_state.data_dict.keys())):
     with col:
         data = st.session_state.data_dict.get(key)
-        close_price, change_pct, open_price = get_index_summary(data)
+        # 获取该板块当前的昨日收盘价
+        current_prev = st.session_state.prev_close_dict.get(key, None)
         
-        if close_price is not None and change_pct is not None:
-            # 判断涨跌：红色涨，绿色跌
-            color = "#ff4d4f" if change_pct >= 0 else "#3ecf8e"
-            arrow = "▲" if change_pct >= 0 else "▼"
-            change_display = f"{arrow} {abs(change_pct):.2f}%"
+        # --- 显示数据卡片 ---
+        if data is not None and not data.empty:
+            close_price = data['价格'].iloc[-1]
+            open_price = data['价格'].iloc[0]
             
-            # 用卡片样式展示
+            # 计算涨跌幅（基于昨日收盘，如果用户输入了的话）
+            if current_prev is not None and current_prev > 0:
+                change_pct = ((close_price - current_prev) / current_prev) * 100
+                calc_label = f"昨收 {current_prev:.2f}"
+            else:
+                # 未输入昨日收盘，使用开盘价估算
+                change_pct = ((close_price - open_price) / open_price) * 100 if open_price != 0 else None
+                calc_label = "⚠️ 请输昨收"
+            
+            color = "#ff4d4f" if (change_pct is not None and change_pct >= 0) else "#3ecf8e"
+            arrow = "▲" if (change_pct is not None and change_pct >= 0) else "▼"
+            change_display = f"{arrow} {abs(change_pct):.2f}%" if change_pct is not None else "N/A"
+            
+            # 卡片主体
             st.markdown(f"""
-            <div style="background: rgba(255,255,255,0.04); border-radius: 12px; padding: 12px 16px; border: 1px solid #1e2a3a;">
+            <div style="background: rgba(255,255,255,0.04); border-radius: 12px; padding: 12px 14px; border: 1px solid #1e2a3a;">
                 <div style="color: #7a8ba3; font-size: 13px; font-weight: 500;">{key}</div>
                 <div style="color: #e8edf5; font-size: 22px; font-weight: 700;">{close_price:.2f}</div>
                 <div style="color: {color}; font-size: 15px; font-weight: 600;">{change_display}</div>
-                <div style="color: #4a5a6e; font-size: 11px;">开盘 {open_price:.2f}</div>
+                <div style="color: #4a5a6e; font-size: 11px;">{calc_label}</div>
             </div>
             """, unsafe_allow_html=True)
+            
+            # 🆕 昨日收盘价输入框（放卡片下方，与卡片融为一体）
+            prev_input = st.number_input(
+                "昨日收盘",
+                value=None if current_prev is None else float(current_prev),
+                step=1.0,
+                format="%.2f",
+                key=f"prev_input_{key}",
+                label_visibility="collapsed",
+                placeholder="输入昨收",
+                help="输入昨日收盘价，用于精确计算涨跌幅"
+            )
+            
+            # 更新 session_state
+            if prev_input != current_prev:
+                st.session_state.prev_close_dict[key] = prev_input if prev_input is not None and prev_input > 0 else None
+                st.rerun()
+                
         else:
+            # 未上传数据时显示占位
             st.markdown(f"""
-            <div style="background: rgba(255,255,255,0.02); border-radius: 12px; padding: 12px 16px; border: 1px dashed #2a3a4a;">
+            <div style="background: rgba(255,255,255,0.02); border-radius: 12px; padding: 12px 14px; border: 1px dashed #2a3a4a;">
                 <div style="color: #7a8ba3; font-size: 13px;">{key}</div>
                 <div style="color: #4a5a6e; font-size: 16px; padding: 8px 0;">⏳ 等待上传</div>
             </div>
