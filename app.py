@@ -4,20 +4,6 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from datetime import datetime
 import warnings
-import json
-
-# ---------- 尝试导入数据源库 ----------
-try:
-    import akshare as ak
-    AKSHARE_AVAILABLE = True
-except ImportError:
-    AKSHARE_AVAILABLE = False
-
-try:
-    import levistock as lk
-    LEVISTOCK_AVAILABLE = True
-except ImportError:
-    LEVISTOCK_AVAILABLE = False
 
 st.set_page_config(page_title="📈 多板块分时图分析器 Pro", page_icon="📊", layout="wide")
 
@@ -30,6 +16,7 @@ if "data_dict" not in st.session_state:
         "创业板指": None
     }
 
+# 🆕 新增：存储每个板块的昨日收盘价
 if "prev_close_dict" not in st.session_state:
     st.session_state.prev_close_dict = {
         "上证主板": None,
@@ -44,20 +31,7 @@ if "events" not in st.session_state:
         "事件描述": ["示例事件A", "示例事件B"]
     })
 
-if "auto_stats" not in st.session_state:
-    st.session_state.auto_stats = {
-        "turnover": None,
-        "change": None,
-        "up_cnt": None,
-        "down_cnt": None,
-        "sectors": None,
-        "last_updated": None
-    }
-
-if "deepseek_api_key" not in st.session_state:
-    st.session_state.deepseek_api_key = ""
-
-# ---------- 2. 智能解析 Excel ----------
+# ---------- 2. 智能解析 Excel（强化版） ----------
 @st.cache_data
 def parse_uploaded_file(uploaded_file):
     """读取并解析上传的文件，自动忽略损坏的样式格式"""
@@ -130,45 +104,39 @@ def parse_uploaded_file(uploaded_file):
         st.error(f"❌ 文件解析失败: {e}")
         return None
 
-# ---------- 3. 计算收盘价和涨跌幅 ----------
+# ---------- 3. 计算收盘价和涨跌幅（基于昨日收盘） ----------
 def get_index_summary(data_df, prev_close):
+    """
+    从分时数据中提取收盘价，并基于昨日收盘价计算涨跌幅
+    - data_df: 分时数据
+    - prev_close: 昨日收盘价（用户输入）
+    """
     if data_df is None or data_df.empty:
-        return None, None, None, None, None
+        return None, None, None, None
     
-    close_price = data_df['价格'].iloc[-1]
-    open_price = data_df['价格'].iloc[0]
+    close_price = data_df['价格'].iloc[-1]      # 今日收盘价
+    open_price = data_df['价格'].iloc[0]       # 今日开盘价
     
+    # 如果用户输入了昨日收盘价，用它计算涨跌幅；否则用今日开盘价估算
     if prev_close is not None and prev_close > 0:
         change_pct = ((close_price - prev_close) / prev_close) * 100
         used_prev = prev_close
         calc_method = "昨日收盘"
     else:
+        # 回退方案：用今日开盘价估算（接近真实值，但不完全准确）
         change_pct = ((close_price - open_price) / open_price) * 100 if open_price != 0 else None
         used_prev = open_price
         calc_method = "开盘价（估算）"
     
     return close_price, change_pct, open_price, used_prev, calc_method
 
-# ---------- 4. 核心绘图函数（跳过休盘） ----------
+# ---------- 4. 核心绘图函数 ----------
 def draw_chart(data_df, events_df, index_name):
     if data_df is None or data_df.empty:
         fig = go.Figure()
         fig.add_annotation(text=f"请上传 {index_name} 数据", x=0.5, y=0.5, showarrow=False, font=dict(size=20, color="gray"))
         fig.update_layout(height=500)
         return fig
-
-    # 拆分上午和下午
-    def time_to_min(t):
-        try:
-            h, m = map(int, t.split(':'))
-            return h*60 + m
-        except:
-            return 0
-
-    data_df = data_df.copy()
-    data_df['分钟'] = data_df['时间'].apply(time_to_min)
-    morning = data_df[data_df['分钟'] <= 690]
-    afternoon = data_df[data_df['分钟'] >= 780]
 
     fig = make_subplots(
         rows=2, cols=1,
@@ -178,48 +146,24 @@ def draw_chart(data_df, events_df, index_name):
         subplot_titles=(f"{index_name} 指数走势", "成交量")
     )
 
-    # 指数折线
     fig.add_trace(
         go.Scatter(
-            x=morning['时间'], y=morning['价格'],
+            x=data_df['时间'], y=data_df['价格'],
             mode='lines', name='指数点位',
             line=dict(color='#ff4d4f', width=2.5),
             fill='tozeroy', fillcolor='rgba(255,77,79,0.1)'
         ),
         row=1, col=1
     )
-    if not afternoon.empty:
-        fig.add_trace(
-            go.Scatter(
-                x=afternoon['时间'], y=afternoon['价格'],
-                mode='lines', name='指数点位',
-                line=dict(color='#ff4d4f', width=2.5),
-                fill='tozeroy', fillcolor='rgba(255,77,79,0.1)',
-                showlegend=False
-            ),
-            row=1, col=1
-        )
 
-    # 成交量柱状
     fig.add_trace(
         go.Bar(
-            x=morning['时间'], y=morning['成交量'],
-            name='成交量', marker_color='#3b82f6', opacity=0.7,
-            offsetgroup=0
+            x=data_df['时间'], y=data_df['成交量'],
+            name='成交量', marker_color='#3b82f6', opacity=0.7
         ),
         row=2, col=1
     )
-    if not afternoon.empty:
-        fig.add_trace(
-            go.Bar(
-                x=afternoon['时间'], y=afternoon['成交量'],
-                name='成交量', marker_color='#3b82f6', opacity=0.7,
-                showlegend=False, offsetgroup=0
-            ),
-            row=2, col=1
-        )
 
-    # 事件标记
     if events_df is not None and not events_df.empty:
         for _, event in events_df.iterrows():
             event_time = str(event['时间']).strip()
@@ -253,161 +197,32 @@ def draw_chart(data_df, events_df, index_name):
 
     return fig
 
-# ---------- 5. 自动获取市场数据 ----------
-def fetch_market_stats():
-    result = {
-        "turnover": None,
-        "change": None,
-        "up_cnt": None,
-        "down_cnt": None,
-        "sectors": None,
-        "success": False
-    }
-    
-    try:
-        # 优先使用 levistock
-        if LEVISTOCK_AVAILABLE:
-            try:
-                emotion = lk.market_emotion_cls()
-                if emotion is not None and not emotion.empty:
-                    if '上涨家数' in emotion.columns:
-                        result["up_cnt"] = emotion['上涨家数'].iloc[0]
-                    if '下跌家数' in emotion.columns:
-                        result["down_cnt"] = emotion['下跌家数'].iloc[0]
-                
-                index_data = lk.market_index_em()
-                if index_data is not None and not index_data.empty:
-                    sh = index_data[index_data['名称'] == '上证指数']
-                    if not sh.empty and '成交额' in sh.columns:
-                        result["turnover"] = round(sh['成交额'].iloc[0] / 100000000, 2)
-                
-                wind = lk.market_wind_cls()
-                if wind is not None and not wind.empty:
-                    result["sectors"] = " · ".join(wind['名称'].head(3).tolist())
-                
-                result["success"] = True
-                return result
-            except Exception as e:
-                st.warning(f"levistock 失败: {e}，尝试 akshare...")
-        
-        if AKSHARE_AVAILABLE:
-            try:
-                spot = ak.stock_zh_a_spot()
-                if spot is not None and not spot.empty:
-                    up_cnt = len(spot[spot['涨跌幅'] > 0])
-                    down_cnt = len(spot[spot['涨跌幅'] < 0])
-                    result["up_cnt"] = up_cnt
-                    result["down_cnt"] = down_cnt
-                    if '成交额' in spot.columns:
-                        total = spot['成交额'].sum() / 100000000
-                        result["turnover"] = round(total, 2)
-                
-                sector = ak.stock_sector_spot()
-                if sector is not None and not sector.empty:
-                    sector = sector.sort_values('涨跌幅', ascending=False)
-                    result["sectors"] = " · ".join(sector['板块名称'].head(3).tolist())
-                
-                result["success"] = True
-                return result
-            except Exception as e:
-                st.warning(f"akshare 失败: {e}")
-        
-        result["success"] = False
-        return result
-        
-    except Exception as e:
-        st.error(f"自动获取数据失败: {e}")
-        result["success"] = False
-        return result
+# ---------- 5. 页面UI布局 ----------
+st.markdown("<h1 style='color:#e8edf5; border-left: 4px solid #ff4d4f; padding-left: 16px;'>📈 多板块分时图分析器 <span style='font-size:16px; color:#7a8ba3;'>上传数据 · 点击切换板块</span></h1>", unsafe_allow_html=True)
 
-# ---------- 6. DeepSeek AI 生成事件（基于上传的数据分析） ----------
-def generate_events_with_deepseek(data_df, events_df, api_key):
-    try:
-        from openai import OpenAI
-        client = OpenAI(api_key=api_key, base_url="https://api.deepseek.com/v1")
-        
-        if data_df is None or data_df.empty:
-            return events_df
-        
-        prompt = f"""
-        今天是{datetime.now().strftime('%Y年%m月%d日')}。
-        某指数今日开盘{data_df['价格'].iloc[0]:.2f}，收盘{data_df['价格'].iloc[-1]:.2f}，
-        日内最高{data_df['价格'].max():.2f}，最低{data_df['价格'].min():.2f}。
-        请根据以上数据，生成2-3个可能的盘中热点事件标签（每个标签包含时间和简短描述），
-        格式为JSON数组：[{{"时间": "HH:MM", "事件描述": "事件内容"}}]
-        时间必须是9:30-15:00之间。如果无法判断具体时间，就根据走势特征标注在9:30、10:30、14:00等关键位置。
-        """
-        
-        response = client.chat.completions.create(
-            model="deepseek-chat",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.7,
-            max_tokens=500
-        )
-        
-        content = response.choices[0].message.content
-        start = content.find('[')
-        end = content.rfind(']') + 1
-        if start != -1 and end != 0:
-            json_str = content[start:end]
-            new_events = json.loads(json_str)
-            if new_events:
-                new_df = pd.DataFrame(new_events)
-                combined = pd.concat([events_df, new_df]).drop_duplicates(subset=['时间'], keep='first')
-                return combined
-        return events_df
-    except Exception as e:
-        st.warning(f"AI生成事件失败: {e}")
-        return events_df
-
-# ---------- 7. 页面UI ----------
-st.markdown("<h1 style='color:#e8edf5; border-left: 4px solid #ff4d4f; padding-left: 16px;'>📈 多板块分时图分析器 <span style='font-size:16px; color:#7a8ba3;'>手动上传 · 自动统计</span></h1>", unsafe_allow_html=True)
-
-# ----- 设置栏 -----
-with st.expander("⚙️ 设置与数据源", expanded=False):
-    col_set1, col_set2, col_set3 = st.columns(3)
-    with col_set1:
-        auto_fetch = st.checkbox("🔄 启用自动统计", value=True, help="点击按钮获取成交额、涨跌家数等")
-    with col_set2:
-        use_ai = st.checkbox("🤖 AI生成事件", value=False, help="需配置DeepSeek API Key")
-    with col_set3:
-        if use_ai:
-            api_key_input = st.text_input("DeepSeek API Key", type="password", placeholder="sk-...")
-            if api_key_input:
-                st.session_state.deepseek_api_key = api_key_input
-
-    if auto_fetch:
-        if st.button("📊 刷新市场统计数据"):
-            with st.spinner("获取中..."):
-                stats = fetch_market_stats()
-                if stats["success"]:
-                    st.session_state.auto_stats = {
-                        "turnover": stats.get("turnover"),
-                        "change": None,
-                        "up_cnt": stats.get("up_cnt"),
-                        "down_cnt": stats.get("down_cnt"),
-                        "sectors": stats.get("sectors"),
-                        "last_updated": datetime.now().strftime("%H:%M:%S")
-                    }
-                    st.success("✅ 数据已更新")
-                    st.rerun()
-                else:
-                    st.error("获取失败，请检查网络")
-
-# ----- 指数概览 -----
+# ============================================================
+# 📊 今日指数概览（含昨日收盘价输入框）
+# ============================================================
 st.markdown("### 📊 今日指数概览")
 cols_overview = st.columns(4)
+
 for i, (col, key) in enumerate(zip(cols_overview, st.session_state.data_dict.keys())):
     with col:
         data = st.session_state.data_dict.get(key)
+        # 获取该板块当前的昨日收盘价
         current_prev = st.session_state.prev_close_dict.get(key, None)
+        
+        # --- 显示数据卡片 ---
         if data is not None and not data.empty:
             close_price = data['价格'].iloc[-1]
             open_price = data['价格'].iloc[0]
+            
+            # 计算涨跌幅（基于昨日收盘，如果用户输入了的话）
             if current_prev is not None and current_prev > 0:
                 change_pct = ((close_price - current_prev) / current_prev) * 100
                 calc_label = f"昨收 {current_prev:.2f}"
             else:
+                # 未输入昨日收盘，使用开盘价估算
                 change_pct = ((close_price - open_price) / open_price) * 100 if open_price != 0 else None
                 calc_label = "⚠️ 请输昨收"
             
@@ -415,6 +230,7 @@ for i, (col, key) in enumerate(zip(cols_overview, st.session_state.data_dict.key
             arrow = "▲" if (change_pct is not None and change_pct >= 0) else "▼"
             change_display = f"{arrow} {abs(change_pct):.2f}%" if change_pct is not None else "N/A"
             
+            # 卡片主体
             st.markdown(f"""
             <div style="background: rgba(255,255,255,0.04); border-radius: 12px; padding: 12px 14px; border: 1px solid #1e2a3a;">
                 <div style="color: #7a8ba3; font-size: 13px; font-weight: 500;">{key}</div>
@@ -424,6 +240,7 @@ for i, (col, key) in enumerate(zip(cols_overview, st.session_state.data_dict.key
             </div>
             """, unsafe_allow_html=True)
             
+            # 🆕 昨日收盘价输入框（放卡片下方，与卡片融为一体）
             prev_input = st.number_input(
                 "昨日收盘",
                 value=None if current_prev is None else float(current_prev),
@@ -431,12 +248,17 @@ for i, (col, key) in enumerate(zip(cols_overview, st.session_state.data_dict.key
                 format="%.2f",
                 key=f"prev_input_{key}",
                 label_visibility="collapsed",
-                placeholder="输入昨收"
+                placeholder="输入昨收",
+                help="输入昨日收盘价，用于精确计算涨跌幅"
             )
+            
+            # 更新 session_state
             if prev_input != current_prev:
                 st.session_state.prev_close_dict[key] = prev_input if prev_input is not None and prev_input > 0 else None
                 st.rerun()
+                
         else:
+            # 未上传数据时显示占位
             st.markdown(f"""
             <div style="background: rgba(255,255,255,0.02); border-radius: 12px; padding: 12px 14px; border: 1px dashed #2a3a4a;">
                 <div style="color: #7a8ba3; font-size: 13px;">{key}</div>
@@ -444,8 +266,10 @@ for i, (col, key) in enumerate(zip(cols_overview, st.session_state.data_dict.key
             </div>
             """, unsafe_allow_html=True)
 
-# ----- 上传区域 -----
-st.markdown("### 📤 第一步：分别上传四个板块的分时数据（Excel/CSV）")
+# ============================================================
+
+# ---------- 第一步：四个上传区域 ----------
+st.markdown("### 📤 第一步：分别上传四个板块的数据")
 cols_upload = st.columns(4)
 index_keys = list(st.session_state.data_dict.keys())
 
@@ -453,55 +277,42 @@ for i, (col, key) in enumerate(zip(cols_upload, index_keys)):
     with col:
         status = "✅" if st.session_state.data_dict[key] is not None else "⬜"
         st.markdown(f"**{status} {key}**")
+        
         uploaded_file = st.file_uploader(
             f"上传 {key} 数据",
             type=['xlsx', 'xls', 'csv'],
             label_visibility="collapsed",
             key=f"upload_{key}"
         )
+        
         if uploaded_file is not None:
             df = parse_uploaded_file(uploaded_file)
             if df is not None:
                 st.session_state.data_dict[key] = df
                 st.success(f"✅ {len(df)} 条数据")
-                # ❌ 已删除：自动检测异动事件
             else:
                 st.session_state.data_dict[key] = None
                 st.error("解析失败")
 
-# ----- 图表 + 右侧面板 -----
+# ---------- 第二步：图表 + 右侧面板 ----------
 col_chart, col_right = st.columns([2.2, 1])
 
 with col_chart:
     st.markdown("### 📊 第二步：点击标签切换板块视图")
     tabs = st.tabs(index_keys)
+    
     for tab, key in zip(tabs, index_keys):
         with tab:
             data = st.session_state.data_dict.get(key)
             fig = draw_chart(data, st.session_state.events, key)
             st.plotly_chart(fig, width='stretch', use_container_width=True)
+            
             if data is None:
-                st.info(f"👆 请先上传 {key} 的数据")
+                st.info(f"👆 请先在顶部上传 {key} 的 Excel 文件")
 
 with col_right:
-    st.subheader("⏱️ 热点事件")
-    
-    # AI生成按钮（基于上传的数据）
-    if use_ai and st.button("🤖 AI生成事件"):
-        if st.session_state.deepseek_api_key:
-            first_data = next((d for d in st.session_state.data_dict.values() if d is not None), None)
-            if first_data is not None:
-                with st.spinner("AI分析中..."):
-                    new_events = generate_events_with_deepseek(first_data, st.session_state.events, st.session_state.deepseek_api_key)
-                    if not new_events.equals(st.session_state.events):
-                        st.session_state.events = new_events
-                        st.success("✅ AI事件已生成")
-                        st.rerun()
-            else:
-                st.warning("请先上传数据")
-        else:
-            st.warning("请先配置API Key")
-    
+    # ---------- 热点事件管理 ----------
+    st.subheader("⏱️ 热点事件 (全局)")
     edited_events = st.data_editor(
         st.session_state.events,
         num_rows="dynamic",
@@ -515,26 +326,26 @@ with col_right:
     if not edited_events.equals(st.session_state.events):
         st.session_state.events = edited_events
         st.rerun()
-    st.caption("💡 手动添加/编辑/删除事件 | AI生成基于上传的分时数据")
+    st.caption("💡 点击表格下方 '添加行' 增加事件，删除行会自动移除")
 
+    # ---------- 底部统计信息 ----------
     st.markdown("---")
     st.subheader("📊 市场统计")
-    auto = st.session_state.auto_stats
+    
     col_s1, col_s2 = st.columns(2)
     with col_s1:
-        turnover = st.text_input("成交额（亿元）", value=str(auto.get("turnover", "")) if auto.get("turnover") else "", key="stat_turnover")
-        up_cnt = st.text_input("上涨家数", value=str(auto.get("up_cnt", "")) if auto.get("up_cnt") else "", key="stat_up")
+        turnover = st.text_input("成交额（亿元）", placeholder="27182.89", key="stat_turnover")
+        up_cnt = st.text_input("上涨家数", placeholder="1740", key="stat_up")
     with col_s2:
         change = st.text_input("较前日增减", placeholder="+464.24", key="stat_change")
-        down_cnt = st.text_input("下跌家数", value=str(auto.get("down_cnt", "")) if auto.get("down_cnt") else "", key="stat_down")
-    sectors = st.text_input("涨幅居前板块", value=auto.get("sectors", "") if auto.get("sectors") else "", key="stat_sectors")
-    if auto.get("last_updated"):
-        st.caption(f"🔄 数据更新时间: {auto['last_updated']}")
+        down_cnt = st.text_input("下跌家数", placeholder="3710", key="stat_down")
+    
+    sectors = st.text_input("涨幅居前板块", placeholder="油气 · 煤炭 · 白酒", key="stat_sectors")
 
-# ----- 底部 -----
+# ---------- 底部时间戳 ----------
 st.markdown("---")
 col_f1, col_f2 = st.columns([3, 1])
 with col_f1:
-    st.caption(f"🕒 数据来源：手动上传 + 自动获取 ｜ 当前时间：{datetime.now().strftime('%Y年%m月%d日 %H:%M')}")
+    st.caption(f"🕒 数据来源：手动上传 ｜ 当前时间：{datetime.now().strftime('%Y年%m月%d日 %H:%M')}")
 with col_f2:
-    st.caption("📌 本地处理，数据不上传")
+    st.caption("📌 所有数据仅在本地处理，不上传服务器")
