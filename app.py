@@ -49,7 +49,6 @@ def normalize_time_to_hm(t_str):
 def is_valid_trading_time(t_str):
     """判断是否为有效交易时间，剔除 11:30 - 13:00 的休盘时间"""
     hm = normalize_time_to_hm(t_str)
-    # 字符串比较："11:30" < hm < "13:00" 完美适用于 HH:MM
     if "11:30" < hm < "13:00":
         return False
     return True
@@ -117,7 +116,7 @@ def parse_uploaded_file(uploaded_file):
         result_df = result_df.dropna(subset=['价格'])
         result_df = result_df[result_df['时间'].str.contains(':', na=False)]
         
-        # === 过滤掉 11:30 到 13:00 之间的休盘数据 ===
+        # 过滤休盘数据
         result_df = result_df[result_df['时间'].apply(is_valid_trading_time)]
 
         if result_df.empty:
@@ -131,14 +130,45 @@ def parse_uploaded_file(uploaded_file):
         return None
 
 
-# ---------- 4. 核心绘图函数 ----------
-def draw_chart(data_df, events_df, index_name):
+# ---------- 4. 核心绘图函数（红绿双色分时算法） ----------
+def draw_chart(data_df, events_df, index_name, prev_close=None):
     if data_df is None or data_df.empty:
         fig = go.Figure()
         fig.add_annotation(text=f"暂无 {index_name} 数据", x=0.5, y=0.5, showarrow=False, font=dict(size=20, color="gray"))
-        fig.update_layout(height=550) # 统一大图高度
+        fig.update_layout(height=550) 
         return fig
 
+    # 确定基准线 (如果输入了昨收，则用昨收；否则用今日开盘价)
+    baseline = prev_close if prev_close and prev_close > 0 else data_df['价格'].iloc[0]
+    prices = data_df['价格'].tolist()
+    times = data_df['时间'].tolist()
+    volumes = data_df['成交量'].tolist()
+
+    # 核心算法：将一条线拆分为红绿两条，并处理交界处以无缝连接
+    y_red = []
+    y_green = []
+    
+    for p in prices:
+        if p >= baseline:
+            y_red.append(p)
+            y_green.append(None)
+        else:
+            y_red.append(None)
+            y_green.append(p)
+
+    # 缝合交界处的空隙
+    for i in range(1, len(prices)):
+        p_prev = prices[i-1]
+        p_curr = prices[i]
+        if p_prev >= baseline and p_curr < baseline:
+            y_green[i-1] = p_prev  # 向下交叉，连接线段标绿
+        elif p_prev < baseline and p_curr >= baseline:
+            y_red[i-1] = p_prev    # 向上交叉，连接线段标红
+
+    # 根据基准线给成交量柱子上色
+    vol_colors = ['#ff4d4f' if p >= baseline else '#3ecf8e' for p in prices]
+
+    # 初始化画布
     fig = make_subplots(
         rows=2, cols=1,
         shared_xaxes=True,
@@ -147,27 +177,62 @@ def draw_chart(data_df, events_df, index_name):
         subplot_titles=(f"{index_name} 指数走势", "成交量")
     )
 
+    # 1. 统一的底层阴影区域 (透明灰，提升高级感)
     fig.add_trace(
         go.Scatter(
-            x=data_df['时间'], y=data_df['价格'],
-            mode='lines', name='指数点位',
-            line=dict(color='#ff4d4f', width=2.5),
-            fill='tozeroy', fillcolor='rgba(255,77,79,0.1)'
+            x=times, y=prices,
+            mode='lines', line=dict(color='rgba(0,0,0,0)', width=0),
+            fill='tozeroy', fillcolor='rgba(150,150,150,0.06)',
+            showlegend=False, hoverinfo='skip'
         ),
         row=1, col=1
     )
 
+    # 2. 红色上涨折线
+    fig.add_trace(
+        go.Scatter(
+            x=times, y=y_red,
+            mode='lines', name='高于基准 (涨)',
+            line=dict(color='#ff4d4f', width=2.5),
+            connectgaps=False
+        ),
+        row=1, col=1
+    )
+
+    # 3. 绿色下跌折线
+    fig.add_trace(
+        go.Scatter(
+            x=times, y=y_green,
+            mode='lines', name='低于基准 (跌)',
+            line=dict(color='#3ecf8e', width=2.5),
+            connectgaps=False
+        ),
+        row=1, col=1
+    )
+
+    # 4. 绘制基准水平虚线
+    baseline_label = "昨收基准" if (prev_close and prev_close > 0) else "开盘基准"
+    fig.add_hline(
+        y=baseline, line_dash="dash", line_color="rgba(255,255,255,0.4)", line_width=1.5,
+        annotation_text=f"{baseline_label}: {baseline:.2f}", 
+        annotation_position="bottom right",
+        annotation_font_color="rgba(255,255,255,0.7)",
+        row=1, col=1
+    )
+
+    # 5. 成交量柱状图 (动态红绿色)
     fig.add_trace(
         go.Bar(
-            x=data_df['时间'], y=data_df['成交量'],
-            name='成交量', marker_color='#3b82f6', opacity=0.7
+            x=times, y=volumes,
+            name='成交量', marker_color=vol_colors, opacity=0.8,
+            showlegend=False
         ),
         row=2, col=1
     )
 
     # 绘制热点事件
     if events_df is not None and not events_df.empty:
-        time_map = {normalize_time_to_hm(t): t for t in data_df['时间'].values}
+        time_map = {normalize_time_to_hm(t): t for t in times}
         for _, event in events_df.iterrows():
             event_time = str(event['时间']).strip()
             event_desc = str(event['事件描述']).strip()
@@ -178,13 +243,14 @@ def draw_chart(data_df, events_df, index_name):
                 fig.add_vline(
                     x=actual_x_in_df, line_dash="dash", line_color="orange", line_width=1.5,
                     annotation_text=event_desc, annotation_position="top left",
-                    annotation_font_size=12, annotation_font_color="orange", # 字体稍微加大一点
+                    annotation_font_size=12, annotation_font_color="orange",
                     annotation_bgcolor="rgba(0,0,0,0.6)",
                     row=1, col=1
                 )
 
+    # 布局更新
     fig.update_layout(
-        height=550,  # 统一使用大图高度
+        height=550, 
         hovermode='x unified',
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
         template='plotly_dark',
@@ -194,14 +260,17 @@ def draw_chart(data_df, events_df, index_name):
     )
 
     if not data_df.empty:
-        min_price = data_df['价格'].min()
-        max_price = data_df['价格'].max()
+        min_price = min(prices)
+        max_price = max(prices)
+        # 为Y轴留出一点上下余量，并且确保基准线包含在内
         padding = (max_price - min_price) * 0.1 if max_price > min_price else 10
-        fig.update_yaxes(title_text="点位", row=1, col=1, range=[min_price - padding, max_price + padding])
+        y_min_bound = min(min_price, baseline) - padding
+        y_max_bound = max(max_price, baseline) + padding
+        fig.update_yaxes(title_text="点位", row=1, col=1, range=[y_min_bound, y_max_bound])
     
     fig.update_yaxes(title_text="成交量", row=2, col=1)
     
-    # 强制使用类目轴 (category)，完美抹平中间缺失的时间断层
+    # 强制类目轴
     fig.update_xaxes(type='category', row=1, col=1)
     fig.update_xaxes(
         title_text="时间", row=2, col=1, 
@@ -280,7 +349,7 @@ if st.session_state.submitted_flag:
     with col_t1:
         st.markdown(f"<h1 style='color:#e8edf5;'>📄 市场复盘分析报告 <span style='font-size:16px; color:#7a8ba3;'>{datetime.now().strftime('%Y-%m-%d')}</span></h1>", unsafe_allow_html=True)
     with col_t2:
-        st.write("") # 占位
+        st.write("") 
         if st.button("⬅️ 返回修改", use_container_width=True):
             st.session_state.submitted_flag = False
             if not st.session_state.submitted_events.empty:
@@ -321,7 +390,7 @@ if st.session_state.submitted_flag:
     </div>
     """, unsafe_allow_html=True)
 
-    # 3. 选项卡切换大图模式 (取代原先的 2x2)
+    # 3. 选项卡切换大图模式
     st.markdown("<br>### 📊 各板块分时走势（含热点事件）", unsafe_allow_html=True)
     index_keys = list(st.session_state.data_dict.keys())
     
@@ -329,7 +398,8 @@ if st.session_state.submitted_flag:
     for tab, key in zip(tabs, index_keys):
         with tab:
             data = st.session_state.data_dict.get(key)
-            fig = draw_chart(data, st.session_state.submitted_events, key)
+            current_prev = st.session_state.prev_close_dict.get(key, None)
+            fig = draw_chart(data, st.session_state.submitted_events, key, current_prev)
             st.plotly_chart(fig, width='stretch', use_container_width=True, key=f"final_chart_{key}")
 
 else:
@@ -371,13 +441,14 @@ else:
             display_events = pd.DataFrame(st.session_state.pending_events)
         else:
             display_events = pd.DataFrame(columns=["时间", "事件描述"])
-        st.info("✏️ 预览模式：在右侧添加事件后可实时在下方预览，最终完成请点击「生成复盘报告」")
+        st.info("✏️ 预览模式：在上方输入昨收可实时触发红绿变色，添加事件后可实时预览。")
 
         tabs = st.tabs(index_keys)
         for tab, key in zip(tabs, index_keys):
             with tab:
                 data = st.session_state.data_dict.get(key)
-                fig = draw_chart(data, display_events, key)
+                current_prev = st.session_state.prev_close_dict.get(key, None)
+                fig = draw_chart(data, display_events, key, current_prev)
                 st.plotly_chart(fig, width='stretch', use_container_width=True)
                 if data is None:
                     st.info(f"👆 请先在顶部上传 {key} 的文件")
@@ -389,7 +460,7 @@ else:
         with col_time:
             new_time = st.text_input("时间", placeholder="09:30", key="new_event_time", label_visibility="collapsed")
         with col_desc:
-            new_desc = st.text_input("事件描述", placeholder="输入事件内容", key="new_event_desc", label_visibility="collapsed")
+            new_desc = st.text_input("事件描述", placeholder="输入事件", key="new_event_desc", label_visibility="collapsed")
         with col_btn:
             st.write("") 
             st.write("") 
