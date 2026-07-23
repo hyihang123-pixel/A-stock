@@ -144,6 +144,13 @@ def draw_chart(data_df, events_df, index_name, prev_close=None):
     times = data_df['时间'].tolist()
     volumes = data_df['成交量'].tolist()
 
+    # 👉 提前计算 Y 轴边界，方便计算悬浮事件标签的高度
+    min_price = min(prices)
+    max_price = max(prices)
+    padding = (max_price - min_price) * 0.15 if max_price > min_price else 10  # 稍微留多点上边距给事件标签
+    y_min_bound = min(min_price, baseline) - padding
+    y_max_bound = max(max_price, baseline) + padding
+
     # 核心算法：将一条线拆分为红绿两条，并处理交界处以无缝连接
     y_red = []
     y_green = []
@@ -230,9 +237,15 @@ def draw_chart(data_df, events_df, index_name, prev_close=None):
         row=2, col=1
     )
 
-    # 绘制热点事件
+    # 👉 修改后的事件绘制逻辑：折叠显示文字 + 悬浮显示全文
     if events_df is not None and not events_df.empty:
         time_map = {normalize_time_to_hm(t): t for t in times}
+        
+        event_xs = []
+        event_ys = []
+        event_texts = []
+        event_hovers = []
+        
         for _, event in events_df.iterrows():
             event_time = str(event['时间']).strip()
             event_desc = str(event['事件描述']).strip()
@@ -240,13 +253,37 @@ def draw_chart(data_df, events_df, index_name, prev_close=None):
             
             if norm_ev_time and event_desc and norm_ev_time in time_map:
                 actual_x_in_df = time_map[norm_ev_time]
+                
+                # 绘制垂直虚线指示位置
                 fig.add_vline(
                     x=actual_x_in_df, line_dash="dash", line_color="orange", line_width=1.5,
-                    annotation_text=event_desc, annotation_position="top left",
-                    annotation_font_size=12, annotation_font_color="orange",
-                    annotation_bgcolor="rgba(0,0,0,0.6)",
                     row=1, col=1
                 )
+                
+                # 截取第一行或前8个字符作为默认显示的摘要
+                short_desc = event_desc[:8] + "..." if len(event_desc) > 8 else event_desc
+                
+                event_xs.append(actual_x_in_df)
+                event_ys.append(y_max_bound - (padding * 0.1)) # 放在图表区域的最上方
+                event_texts.append(f"{event_time} {short_desc}")
+                event_hovers.append(f"<b>时间：</b>{event_time}<br><b>事件：</b>{event_desc}")
+        
+        # 将所有事件摘要作为一个带悬浮交互的散点图层绘制出来
+        if event_xs:
+            fig.add_trace(
+                go.Scatter(
+                    x=event_xs, y=event_ys,
+                    mode='markers+text',
+                    marker=dict(symbol='triangle-down', size=9, color='orange'),
+                    text=event_texts,
+                    textposition='bottom right', # 放在向下箭头的右下方
+                    textfont=dict(color='orange', size=11),
+                    hovertext=event_hovers,       # 鼠标放上去时显示的完整内容
+                    hoverinfo='text',             # 强制只显示自定义的 hovertext
+                    showlegend=False
+                ),
+                row=1, col=1
+            )
 
     # 布局更新
     fig.update_layout(
@@ -259,15 +296,8 @@ def draw_chart(data_df, events_df, index_name, prev_close=None):
         margin=dict(l=20, r=20, t=40, b=20)
     )
 
-    if not data_df.empty:
-        min_price = min(prices)
-        max_price = max(prices)
-        # 为Y轴留出一点上下余量，并且确保基准线包含在内
-        padding = (max_price - min_price) * 0.1 if max_price > min_price else 10
-        y_min_bound = min(min_price, baseline) - padding
-        y_max_bound = max(max_price, baseline) + padding
-        fig.update_yaxes(title_text="点位", row=1, col=1, range=[y_min_bound, y_max_bound])
-    
+    # 锁定 Y 轴边界
+    fig.update_yaxes(title_text="点位", row=1, col=1, range=[y_min_bound, y_max_bound])
     fig.update_yaxes(title_text="成交量", row=2, col=1)
     
     # 强制类目轴
