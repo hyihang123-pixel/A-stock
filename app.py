@@ -24,16 +24,12 @@ if "prev_close_dict" not in st.session_state:
         "创业板指": None
     }
 
-# ---------- 修改：热点事件存储 ----------
-# 已提交的事件（显示在图表上）
 if "events" not in st.session_state:
     st.session_state.events = pd.DataFrame(columns=["时间", "事件描述"])
 
-# 待提交的事件列表（暂存）
 if "pending_events" not in st.session_state:
-    st.session_state.pending_events = []  # 元素格式: {"时间": "09:40", "事件描述": "xxx"}
+    st.session_state.pending_events = []
 
-# 提交状态
 if "submitted_flag" not in st.session_state:
     st.session_state.submitted_flag = False
 if "submitted_events" not in st.session_state:
@@ -46,7 +42,6 @@ if "submitted_stats" not in st.session_state:
 # ---------- 2. 智能解析 Excel ----------
 @st.cache_data
 def parse_uploaded_file(uploaded_file):
-    """读取并解析上传的文件，自动忽略损坏的样式格式"""
     try:
         if uploaded_file.name.endswith('.csv'):
             df = pd.read_csv(uploaded_file, encoding='gbk')
@@ -135,7 +130,20 @@ def get_index_summary(data_df, prev_close):
     
     return close_price, change_pct, open_price, used_prev, calc_method
 
-# ---------- 4. 核心绘图函数（保持不变） ----------
+# ---------- 辅助：时间转分钟 ----------
+def time_to_min(t):
+    try:
+        t_str = str(t).strip()
+        if ':' not in t_str:
+            return -1
+        parts = t_str.split(':')
+        h = int(parts[0])
+        m = int(parts[1])
+        return h * 60 + m
+    except:
+        return -1
+
+# ---------- 4. 核心绘图函数 ----------
 def draw_chart(data_df, events_df, index_name):
     if data_df is None or data_df.empty:
         fig = go.Figure()
@@ -169,18 +177,36 @@ def draw_chart(data_df, events_df, index_name):
         row=2, col=1
     )
 
+    # ----- 事件标记 -----
     if events_df is not None and not events_df.empty:
+        # 构建分钟映射
+        data_times_str = data_df['时间'].astype(str).str.strip()
+        data_minutes = data_times_str.apply(time_to_min)
+        minute_to_time = dict(zip(data_minutes, data_times_str))
+        
         for _, event in events_df.iterrows():
-            event_time = str(event['时间']).strip()
-            event_desc = str(event['事件描述']).strip()
-            if event_time and event_desc and event_time in data_df['时间'].values:
-                fig.add_vline(
-                    x=event_time, line_dash="dash", line_color="orange", line_width=1.5,
-                    annotation_text=event_desc, annotation_position="top left",
-                    annotation_font_size=11, annotation_font_color="orange",
-                    annotation_bgcolor="rgba(0,0,0,0.6)",
-                    row=1, col=1
-                )
+            try:
+                event_time = str(event['时间']).strip()
+                event_desc = str(event['事件描述']).strip()
+                if not event_time or not event_desc:
+                    continue
+                minute_val = time_to_min(event_time)
+                if minute_val in minute_to_time:
+                    matched_time = minute_to_time[minute_val]
+                    fig.add_vline(
+                        x=matched_time,
+                        line_dash="dash",
+                        line_color="orange",
+                        line_width=1.5,
+                        annotation_text=event_desc,
+                        annotation_position="top left",
+                        annotation_font_size=11,
+                        annotation_font_color="orange",
+                        annotation_bgcolor="rgba(0,0,0,0.6)",
+                        row=1, col=1
+                    )
+            except Exception as e:
+                continue
 
     fig.update_layout(
         height=520, hovermode='x unified',
@@ -202,11 +228,11 @@ def draw_chart(data_df, events_df, index_name):
 
     return fig
 
-# ---------- 5. 页面UI布局 ----------
+# ---------- 5. 页面UI ----------
 st.markdown("<h1 style='color:#e8edf5; border-left: 4px solid #ff4d4f; padding-left: 16px;'>📈 多板块分时图分析器 <span style='font-size:16px; color:#7a8ba3;'>上传数据 · 提交生成</span></h1>", unsafe_allow_html=True)
 
 # ============================================================
-# 📊 今日指数概览（含昨日收盘价输入框）
+# 📊 今日指数概览
 # ============================================================
 st.markdown("### 📊 今日指数概览")
 cols_overview = st.columns(4)
@@ -264,7 +290,7 @@ for i, (col, key) in enumerate(zip(cols_overview, st.session_state.data_dict.key
 
 # ============================================================
 
-# ---------- 第一步：四个上传区域 ----------
+# ---------- 上传区域 ----------
 st.markdown("### 📤 第一步：分别上传四个板块的分时数据（Excel/CSV）")
 cols_upload = st.columns(4)
 index_keys = list(st.session_state.data_dict.keys())
@@ -290,7 +316,7 @@ for i, (col, key) in enumerate(zip(cols_upload, index_keys)):
                 st.session_state.data_dict[key] = None
                 st.error("解析失败")
 
-# ---------- 第二步：图表 + 右侧面板 ----------
+# ---------- 图表 + 右侧面板 ----------
 col_chart, col_right = st.columns([2.2, 1])
 
 with col_chart:
@@ -303,6 +329,11 @@ with col_chart:
         display_events = st.session_state.events
         st.info("✏️ 编辑模式，完成事件和统计后点击「提交」")
 
+    # 🔍 调试信息
+    st.write(f"当前显示事件数：{len(display_events)}")
+    if not display_events.empty:
+        st.write("事件内容预览：", display_events.head())
+
     tabs = st.tabs(index_keys)
     for tab, key in zip(tabs, index_keys):
         with tab:
@@ -313,26 +344,23 @@ with col_chart:
                 st.info(f"👆 请先在顶部上传 {key} 的 Excel 文件")
 
 with col_right:
-    # ---------- 热点事件管理（新交互方式） ----------
+    # ---------- 热点事件管理 ----------
     st.subheader("⏱️ 热点事件")
     
     if st.session_state.submitted_flag:
         st.info("已提交，事件锁定。如需修改请点击「重置」")
-        # 显示已提交的事件（只读）
         st.dataframe(st.session_state.submitted_events, use_container_width=True)
     else:
-        # 添加事件输入区
         col_time, col_desc, col_btn = st.columns([1.2, 2.5, 0.8])
         with col_time:
             new_time = st.text_input("时间", placeholder="09:30", key="new_event_time", label_visibility="collapsed")
         with col_desc:
             new_desc = st.text_input("事件描述", placeholder="输入事件内容", key="new_event_desc", label_visibility="collapsed")
         with col_btn:
-            st.write("")  # 占位
-            st.write("")  # 占位
+            st.write("")
+            st.write("")
             if st.button("➕ 添加", use_container_width=True):
                 if new_time.strip() and new_desc.strip():
-                    # 添加到待提交列表
                     st.session_state.pending_events.append({
                         "时间": new_time.strip(),
                         "事件描述": new_desc.strip()
@@ -341,12 +369,8 @@ with col_right:
                 else:
                     st.warning("请完整填写时间和事件描述")
         
-        # 显示待提交事件列表
         if st.session_state.pending_events:
             st.markdown("**📋 待提交事件列表**")
-            # 用表格显示
-            df_pending = pd.DataFrame(st.session_state.pending_events)
-            # 添加删除按钮列（用 HTML + 按钮模拟）
             for idx, event in enumerate(st.session_state.pending_events):
                 col1, col2, col3 = st.columns([1.2, 2.5, 0.8])
                 with col1:
@@ -367,7 +391,6 @@ with col_right:
     st.subheader("📊 市场统计")
 
     if st.session_state.submitted_flag:
-        # 已提交：大号加粗显示
         stats = st.session_state.submitted_stats
         st.markdown(f"""
         <div style="background: rgba(255,255,255,0.05); border-radius: 12px; padding: 16px;">
@@ -394,7 +417,6 @@ with col_right:
         </div>
         """, unsafe_allow_html=True)
     else:
-        # 编辑模式：输入框
         col_s1, col_s2 = st.columns(2)
         with col_s1:
             turnover = st.text_input("成交额（亿元）", placeholder="27182.89", key="stat_turnover")
@@ -404,12 +426,14 @@ with col_right:
             down_cnt = st.text_input("下跌家数", placeholder="3710", key="stat_down")
         sectors = st.text_input("涨幅居前板块", placeholder="油气 · 煤炭 · 白酒", key="stat_sectors")
 
-    # ---------- 提交 & 重置按钮 ----------
+    # ---------- 提交 & 重置 ----------
     st.markdown("---")
     col_btn1, col_btn2 = st.columns(2)
     with col_btn1:
         if st.button("✅ 提交", use_container_width=True, disabled=st.session_state.submitted_flag):
-            # 收集统计输入
+            # 读取当前待提交事件
+            current_pending = st.session_state.pending_events.copy()  # 复制一份，防止清空影响
+            
             stats = {
                 "turnover": st.session_state.get("stat_turnover", ""),
                 "change": st.session_state.get("stat_change", ""),
@@ -417,9 +441,9 @@ with col_right:
                 "down_cnt": st.session_state.get("stat_down", ""),
                 "sectors": st.session_state.get("stat_sectors", "")
             }
-            # 将待提交事件转换为 DataFrame
-            if st.session_state.pending_events:
-                submitted_events_df = pd.DataFrame(st.session_state.pending_events)
+            
+            if current_pending:
+                submitted_events_df = pd.DataFrame(current_pending)
             else:
                 submitted_events_df = pd.DataFrame(columns=["时间", "事件描述"])
             
@@ -427,7 +451,7 @@ with col_right:
             st.session_state.submitted_events = submitted_events_df
             st.session_state.submitted_stats = stats
             st.session_state.submitted_flag = True
-            # 清空待提交列表（可选，提交后清空）
+            # 清空待提交列表
             st.session_state.pending_events = []
             st.rerun()
     with col_btn2:
@@ -437,10 +461,10 @@ with col_right:
             st.session_state.submitted_stats = {
                 "turnover": "", "change": "", "up_cnt": "", "down_cnt": "", "sectors": ""
             }
-            st.session_state.pending_events = []  # 也清空待提交列表
+            st.session_state.pending_events = []
             st.rerun()
 
-# ---------- 底部时间戳 ----------
+# ---------- 底部 ----------
 st.markdown("---")
 col_f1, col_f2 = st.columns([3, 1])
 with col_f1:
