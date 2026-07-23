@@ -117,7 +117,7 @@ def parse_uploaded_file(uploaded_file):
         result_df = result_df.dropna(subset=['价格'])
         result_df = result_df[result_df['时间'].str.contains(':', na=False)]
         
-        # === 核心修改：过滤掉 11:30 到 13:00 之间的休盘数据 ===
+        # === 过滤掉 11:30 到 13:00 之间的休盘数据 ===
         result_df = result_df[result_df['时间'].apply(is_valid_trading_time)]
 
         if result_df.empty:
@@ -136,7 +136,7 @@ def draw_chart(data_df, events_df, index_name):
     if data_df is None or data_df.empty:
         fig = go.Figure()
         fig.add_annotation(text=f"暂无 {index_name} 数据", x=0.5, y=0.5, showarrow=False, font=dict(size=20, color="gray"))
-        fig.update_layout(height=400 if st.session_state.submitted_flag else 500)
+        fig.update_layout(height=550) # 统一大图高度
         return fig
 
     fig = make_subplots(
@@ -178,13 +178,13 @@ def draw_chart(data_df, events_df, index_name):
                 fig.add_vline(
                     x=actual_x_in_df, line_dash="dash", line_color="orange", line_width=1.5,
                     annotation_text=event_desc, annotation_position="top left",
-                    annotation_font_size=11, annotation_font_color="orange",
+                    annotation_font_size=12, annotation_font_color="orange", # 字体稍微加大一点
                     annotation_bgcolor="rgba(0,0,0,0.6)",
                     row=1, col=1
                 )
 
     fig.update_layout(
-        height=450 if st.session_state.submitted_flag else 520,  # 报告模式下高度稍微压紧一点
+        height=550,  # 统一使用大图高度
         hovermode='x unified',
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
         template='plotly_dark',
@@ -201,14 +201,14 @@ def draw_chart(data_df, events_df, index_name):
     
     fig.update_yaxes(title_text="成交量", row=2, col=1)
     
-    # === 核心修改：强制使用类目轴 (category)，完美抹平中间缺失的时间断层 ===
+    # 强制使用类目轴 (category)，完美抹平中间缺失的时间断层
     fig.update_xaxes(type='category', row=1, col=1)
     fig.update_xaxes(
         title_text="时间", row=2, col=1, 
-        type='category',     # 强制类目轴
+        type='category',
         tickangle=45, 
         tickfont=dict(size=10),
-        nticks=15            # 限制刻度数量，防止标签拥挤重叠
+        nticks=15
     )
 
     return fig
@@ -216,7 +216,7 @@ def draw_chart(data_df, events_df, index_name):
 
 # ---------- 5. 模块化 UI 组件 ----------
 def render_index_overview(edit_mode=True):
-    """渲染指数概览（兼容编辑和展示两种模式）"""
+    """渲染指数概览"""
     st.markdown("### 📊 今日指数概览")
     cols_overview = st.columns(4)
 
@@ -249,7 +249,6 @@ def render_index_overview(edit_mode=True):
                 </div>
                 """, unsafe_allow_html=True)
                 
-                # 只有在编辑模式下才渲染输入框
                 if edit_mode:
                     prev_input = st.number_input(
                         "昨日收盘",
@@ -270,7 +269,7 @@ def render_index_overview(edit_mode=True):
 
 
 # ============================================================
-# 主界面渲染逻辑分流：根据 submitted_flag 决定展示 编辑态 或 报告态
+# 主界面渲染逻辑分流
 # ============================================================
 
 if st.session_state.submitted_flag:
@@ -284,7 +283,6 @@ if st.session_state.submitted_flag:
         st.write("") # 占位
         if st.button("⬅️ 返回修改", use_container_width=True):
             st.session_state.submitted_flag = False
-            # 将已提交的事件还原回待编辑列表
             if not st.session_state.submitted_events.empty:
                 st.session_state.pending_events = st.session_state.submitted_events.to_dict('records')
             st.session_state.submitted_events = pd.DataFrame(columns=["时间", "事件描述"])
@@ -295,7 +293,7 @@ if st.session_state.submitted_flag:
     # 1. 概览区
     render_index_overview(edit_mode=False)
 
-    # 2. 市场统计区（大屏横向排版）
+    # 2. 市场统计区
     st.markdown("<br>### 📈 核心市场统计", unsafe_allow_html=True)
     stats = st.session_state.submitted_stats
     st.markdown(f"""
@@ -323,24 +321,20 @@ if st.session_state.submitted_flag:
     </div>
     """, unsafe_allow_html=True)
 
-    # 3. 2x2 图表矩阵
+    # 3. 选项卡切换大图模式 (取代原先的 2x2)
     st.markdown("<br>### 📊 各板块分时走势（含热点事件）", unsafe_allow_html=True)
     index_keys = list(st.session_state.data_dict.keys())
     
-    row1_cols = st.columns(2)
-    row2_cols = st.columns(2)
-    
-    for idx, key in enumerate(index_keys):
-        # 决定放在哪一行哪一列
-        target_col = row1_cols[idx] if idx < 2 else row2_cols[idx - 2]
-        with target_col:
+    tabs = st.tabs(index_keys)
+    for tab, key in zip(tabs, index_keys):
+        with tab:
             data = st.session_state.data_dict.get(key)
             fig = draw_chart(data, st.session_state.submitted_events, key)
             st.plotly_chart(fig, width='stretch', use_container_width=True, key=f"final_chart_{key}")
 
 else:
     # ----------------------------------------------------
-    # 🛠️ 编辑模式：工作台界面（默认）
+    # 🛠️ 编辑模式：工作台界面
     # ----------------------------------------------------
     st.markdown("<h1 style='color:#e8edf5; border-left: 4px solid #ff4d4f; padding-left: 16px;'>📈 多板块分时图分析器 <span style='font-size:16px; color:#7a8ba3;'>工作台模式</span></h1>", unsafe_allow_html=True)
     
@@ -438,7 +432,6 @@ else:
 
         st.markdown("---")
         if st.button("🚀 生成复盘报告", use_container_width=True, type="primary"):
-            # 保存统计数据
             stats = {
                 "turnover": st.session_state.get("stat_turnover", ""),
                 "change": st.session_state.get("stat_change", ""),
