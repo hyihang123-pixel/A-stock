@@ -25,14 +25,14 @@ if "prev_close_dict" not in st.session_state:
         "创业板指": None
     }
 
-# 热点事件存储
+# 热点事件存储 (更新字段结构)
 if "pending_events" not in st.session_state:
     st.session_state.pending_events = [] 
 
 if "submitted_flag" not in st.session_state:
     st.session_state.submitted_flag = False
 if "submitted_events" not in st.session_state:
-    st.session_state.submitted_events = pd.DataFrame(columns=["时间", "事件描述"])
+    st.session_state.submitted_events = pd.DataFrame(columns=["时间", "事件标题", "事件内容"])
 if "submitted_stats" not in st.session_state:
     st.session_state.submitted_stats = {
         "turnover": "", "change": "", "up_cnt": "", "down_cnt": "", "sectors": ""
@@ -130,7 +130,7 @@ def parse_uploaded_file(uploaded_file):
         return None
 
 
-# ---------- 4. 核心绘图函数（红绿双色分时算法） ----------
+# ---------- 4. 核心绘图函数（红绿双色分时算法 + 智能防遮挡） ----------
 def draw_chart(data_df, events_df, index_name, prev_close=None):
     if data_df is None or data_df.empty:
         fig = go.Figure()
@@ -138,20 +138,23 @@ def draw_chart(data_df, events_df, index_name, prev_close=None):
         fig.update_layout(height=550) 
         return fig
 
-    # 确定基准线 (如果输入了昨收，则用昨收；否则用今日开盘价)
     baseline = prev_close if prev_close and prev_close > 0 else data_df['价格'].iloc[0]
     prices = data_df['价格'].tolist()
     times = data_df['时间'].tolist()
     volumes = data_df['成交量'].tolist()
 
-    # 👉 提前计算 Y 轴边界，方便计算悬浮事件标签的高度
+    # 👉 为智能错位计算Y轴边界 (大幅增加顶部留白 40%)
     min_price = min(prices)
     max_price = max(prices)
-    padding = (max_price - min_price) * 0.15 if max_price > min_price else 10  # 稍微留多点上边距给事件标签
-    y_min_bound = min(min_price, baseline) - padding
-    y_max_bound = max(max_price, baseline) + padding
+    price_range = max_price - min_price if max_price > min_price else (baseline * 0.02 if baseline else 10)
+    
+    top_padding = price_range * 0.40  # 顶部多留 40% 空间，用于叠放事件气泡
+    bottom_padding = price_range * 0.10
+    
+    y_min_bound = min(min_price, baseline) - bottom_padding
+    y_max_bound = max(max_price, baseline) + top_padding
 
-    # 核心算法：将一条线拆分为红绿两条，并处理交界处以无缝连接
+    # 核心算法：拆分红绿折线
     y_red = []
     y_green = []
     
@@ -163,16 +166,14 @@ def draw_chart(data_df, events_df, index_name, prev_close=None):
             y_red.append(None)
             y_green.append(p)
 
-    # 缝合交界处的空隙
     for i in range(1, len(prices)):
         p_prev = prices[i-1]
         p_curr = prices[i]
         if p_prev >= baseline and p_curr < baseline:
-            y_green[i-1] = p_prev  # 向下交叉，连接线段标绿
+            y_green[i-1] = p_prev
         elif p_prev < baseline and p_curr >= baseline:
-            y_red[i-1] = p_prev    # 向上交叉，连接线段标红
+            y_red[i-1] = p_prev
 
-    # 根据基准线给成交量柱子上色
     vol_colors = ['#ff4d4f' if p >= baseline else '#3ecf8e' for p in prices]
 
     # 初始化画布
@@ -184,130 +185,125 @@ def draw_chart(data_df, events_df, index_name, prev_close=None):
         subplot_titles=(f"{index_name} 指数走势", "成交量")
     )
 
-    # 1. 统一的底层阴影区域 (透明灰，提升高级感)
-    fig.add_trace(
-        go.Scatter(
-            x=times, y=prices,
-            mode='lines', line=dict(color='rgba(0,0,0,0)', width=0),
-            fill='tozeroy', fillcolor='rgba(150,150,150,0.06)',
-            showlegend=False, hoverinfo='skip'
-        ),
-        row=1, col=1
-    )
+    fig.add_trace(go.Scatter(
+        x=times, y=prices, mode='lines', line=dict(color='rgba(0,0,0,0)', width=0),
+        fill='tozeroy', fillcolor='rgba(150,150,150,0.06)', showlegend=False, hoverinfo='skip'
+    ), row=1, col=1)
 
-    # 2. 红色上涨折线
-    fig.add_trace(
-        go.Scatter(
-            x=times, y=y_red,
-            mode='lines', name='高于基准 (涨)',
-            line=dict(color='#ff4d4f', width=2.5),
-            connectgaps=False
-        ),
-        row=1, col=1
-    )
+    fig.add_trace(go.Scatter(
+        x=times, y=y_red, mode='lines', name='高于基准 (涨)',
+        line=dict(color='#ff4d4f', width=2.5), connectgaps=False
+    ), row=1, col=1)
 
-    # 3. 绿色下跌折线
-    fig.add_trace(
-        go.Scatter(
-            x=times, y=y_green,
-            mode='lines', name='低于基准 (跌)',
-            line=dict(color='#3ecf8e', width=2.5),
-            connectgaps=False
-        ),
-        row=1, col=1
-    )
+    fig.add_trace(go.Scatter(
+        x=times, y=y_green, mode='lines', name='低于基准 (跌)',
+        line=dict(color='#3ecf8e', width=2.5), connectgaps=False
+    ), row=1, col=1)
 
-    # 4. 绘制基准水平虚线
     baseline_label = "昨收基准" if (prev_close and prev_close > 0) else "开盘基准"
     fig.add_hline(
         y=baseline, line_dash="dash", line_color="rgba(255,255,255,0.4)", line_width=1.5,
-        annotation_text=f"{baseline_label}: {baseline:.2f}", 
-        annotation_position="bottom right",
-        annotation_font_color="rgba(255,255,255,0.7)",
-        row=1, col=1
+        annotation_text=f"{baseline_label}: {baseline:.2f}", annotation_position="bottom right",
+        annotation_font_color="rgba(255,255,255,0.7)", row=1, col=1
     )
 
-    # 5. 成交量柱状图 (动态红绿色)
-    fig.add_trace(
-        go.Bar(
-            x=times, y=volumes,
-            name='成交量', marker_color=vol_colors, opacity=0.8,
-            showlegend=False
-        ),
-        row=2, col=1
-    )
+    fig.add_trace(go.Bar(
+        x=times, y=volumes, name='成交量', marker_color=vol_colors, opacity=0.8, showlegend=False
+    ), row=2, col=1)
 
-    # 👉 修改后的事件绘制逻辑：折叠显示文字 + 悬浮显示全文
+    # 👉 升级版：带防遮挡算法的事件绘制
     if events_df is not None and not events_df.empty:
-        time_map = {normalize_time_to_hm(t): t for t in times}
+        # 记录每个时间的索引位置，用于计算横向距离
+        time_map = {normalize_time_to_hm(t): (idx, t) for idx, t in enumerate(times)}
         
         event_xs = []
         event_ys = []
         event_texts = []
         event_hovers = []
         
+        placed_events = [] # 存储已放置的事件 (x轴索引, 所在层级)
+        safe_distance = 25 # 防遮挡安全距离（间隔小于25分钟视为会遮挡）
+        
         for _, event in events_df.iterrows():
-            event_time = str(event['时间']).strip()
-            event_desc = str(event['事件描述']).strip()
+            event_time = str(event.get('时间', '')).strip()
+            # 兼容旧版本字段
+            event_title = str(event.get('事件标题', event.get('事件描述', ''))).strip()
+            event_content = str(event.get('事件内容', '')).strip()
+            
             norm_ev_time = normalize_time_to_hm(event_time)
             
-            if norm_ev_time and event_desc and norm_ev_time in time_map:
-                actual_x_in_df = time_map[norm_ev_time]
+            if norm_ev_time and event_title and norm_ev_time in time_map:
+                x_idx, actual_x_in_df = time_map[norm_ev_time]
                 
-                # 绘制垂直虚线指示位置
+                # 画出竖直虚线
                 fig.add_vline(
                     x=actual_x_in_df, line_dash="dash", line_color="orange", line_width=1.5,
                     row=1, col=1
                 )
                 
-                # 截取第一行或前8个字符作为默认显示的摘要
-                short_desc = event_desc[:8] + "..." if len(event_desc) > 8 else event_desc
+                # ---------------- 防遮挡碰撞检测算法 ----------------
+                level = 0
+                while True:
+                    conflict = False
+                    for prev_idx, prev_level in placed_events:
+                        # 如果在同一层，且横向距离小于安全距离，则发生碰撞
+                        if prev_level == level and abs(x_idx - prev_idx) < safe_distance:
+                            conflict = True
+                            break
+                    if not conflict:
+                        break # 找到没有冲突的层级
+                    level += 1 # 碰撞了，往下一层挪
+                
+                placed_events.append((x_idx, level))
+                
+                # 根据所在层级计算 Y 坐标 (每降一层，Y轴往下挪)
+                # 留出 5% 的绝对顶边距，每一层占据总高度的 ~6%
+                y_val = y_max_bound - (top_padding * 0.05) - (level * top_padding * 0.18)
                 
                 event_xs.append(actual_x_in_df)
-                event_ys.append(y_max_bound - (padding * 0.1)) # 放在图表区域的最上方
-                event_texts.append(f"{event_time} {short_desc}")
-                event_hovers.append(f"<b>时间：</b>{event_time}<br><b>事件：</b>{event_desc}")
+                event_ys.append(y_val)
+                event_texts.append(f"{event_time} {event_title}")
+                
+                # 组合悬浮显示的富文本
+                hover_html = f"<b>时间：</b>{event_time}<br><b>标题：</b>{event_title}"
+                if event_content:
+                    # 每30个字符自动换行一下，防止内容过长导致悬浮框溢出
+                    wrapped_content = "<br>".join([event_content[i:i+30] for i in range(0, len(event_content), 30)])
+                    hover_html += f"<br><b>内容：</b>{wrapped_content}"
+                
+                event_hovers.append(hover_html)
         
-        # 将所有事件摘要作为一个带悬浮交互的散点图层绘制出来
+        # 批量绘制所有计算好坐标的气泡
         if event_xs:
             fig.add_trace(
                 go.Scatter(
                     x=event_xs, y=event_ys,
                     mode='markers+text',
-                    marker=dict(symbol='triangle-down', size=9, color='orange'),
+                    marker=dict(symbol='triangle-down', size=10, color='orange'),
                     text=event_texts,
-                    textposition='bottom right', # 放在向下箭头的右下方
-                    textfont=dict(color='orange', size=11),
-                    hovertext=event_hovers,       # 鼠标放上去时显示的完整内容
-                    hoverinfo='text',             # 强制只显示自定义的 hovertext
+                    textposition='middle right', # 放到居中偏右，方便多层堆叠时对齐
+                    textfont=dict(color='orange', size=12),
+                    hovertext=event_hovers,       # 悬浮显示标题+内容
+                    hoverinfo='text',             
                     showlegend=False
                 ),
                 row=1, col=1
             )
 
-    # 布局更新
     fig.update_layout(
-        height=550, 
-        hovermode='x unified',
+        height=550, hovermode='x unified',
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-        template='plotly_dark',
-        paper_bgcolor='rgba(0,0,0,0)',
-        plot_bgcolor='rgba(0,0,0,0)',
+        template='plotly_dark', paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
         margin=dict(l=20, r=20, t=40, b=20)
     )
 
-    # 锁定 Y 轴边界
     fig.update_yaxes(title_text="点位", row=1, col=1, range=[y_min_bound, y_max_bound])
     fig.update_yaxes(title_text="成交量", row=2, col=1)
     
-    # 强制类目轴
     fig.update_xaxes(type='category', row=1, col=1)
     fig.update_xaxes(
-        title_text="时间", row=2, col=1, 
-        type='category',
-        tickangle=45, 
-        tickfont=dict(size=10),
-        nticks=15
+        title_text="时间", row=2, col=1, type='category',
+        tickangle=45, tickfont=dict(size=10), nticks=15
     )
 
     return fig
@@ -350,8 +346,7 @@ def render_index_overview(edit_mode=True):
                 
                 if edit_mode:
                     prev_input = st.number_input(
-                        "昨日收盘",
-                        value=None if current_prev is None else float(current_prev),
+                        "昨日收盘", value=None if current_prev is None else float(current_prev),
                         step=1.0, format="%.2f", key=f"prev_input_{key}",
                         label_visibility="collapsed", placeholder="输入昨收",
                     )
@@ -384,15 +379,13 @@ if st.session_state.submitted_flag:
             st.session_state.submitted_flag = False
             if not st.session_state.submitted_events.empty:
                 st.session_state.pending_events = st.session_state.submitted_events.to_dict('records')
-            st.session_state.submitted_events = pd.DataFrame(columns=["时间", "事件描述"])
+            st.session_state.submitted_events = pd.DataFrame(columns=["时间", "事件标题", "事件内容"])
             st.rerun()
     
     st.markdown("---")
 
-    # 1. 概览区
     render_index_overview(edit_mode=False)
 
-    # 2. 市场统计区
     st.markdown("<br>### 📈 核心市场统计", unsafe_allow_html=True)
     stats = st.session_state.submitted_stats
     st.markdown(f"""
@@ -420,7 +413,6 @@ if st.session_state.submitted_flag:
     </div>
     """, unsafe_allow_html=True)
 
-    # 3. 选项卡切换大图模式
     st.markdown("<br>### 📊 各板块分时走势（含热点事件）", unsafe_allow_html=True)
     index_keys = list(st.session_state.data_dict.keys())
     
@@ -470,8 +462,8 @@ else:
         if st.session_state.pending_events:
             display_events = pd.DataFrame(st.session_state.pending_events)
         else:
-            display_events = pd.DataFrame(columns=["时间", "事件描述"])
-        st.info("✏️ 预览模式：在上方输入昨收可实时触发红绿变色，添加事件后可实时预览。")
+            display_events = pd.DataFrame(columns=["时间", "事件标题", "事件内容"])
+        st.info("✏️ 预览模式：在上方输入昨收可实时触发红绿变色，添加事件后可实时预览（事件密集时会自动阶梯排列防遮挡）。")
 
         tabs = st.tabs(index_keys)
         for tab, key in zip(tabs, index_keys):
@@ -486,33 +478,36 @@ else:
     with col_right:
         st.subheader("⏱️ 热点事件编辑")
         
-        col_time, col_desc, col_btn = st.columns([1.2, 2.5, 0.8])
+        # 将输入框布局拆分为 时间、标题、内容
+        col_time, col_title, col_content, col_btn = st.columns([1, 1.5, 2.5, 0.8])
         with col_time:
             new_time = st.text_input("时间", placeholder="09:30", key="new_event_time", label_visibility="collapsed")
-        with col_desc:
-            new_desc = st.text_input("事件描述", placeholder="输入事件", key="new_event_desc", label_visibility="collapsed")
+        with col_title:
+            new_title = st.text_input("事件标题", placeholder="短标题(图上直显)", key="new_event_title", label_visibility="collapsed")
+        with col_content:
+            new_content = st.text_input("事件内容", placeholder="详细内容(悬浮查看)", key="new_event_content", label_visibility="collapsed")
         with col_btn:
-            st.write("") 
-            st.write("") 
             if st.button("➕", use_container_width=True, help="添加事件"):
-                if new_time.strip() and new_desc.strip():
+                if new_time.strip() and new_title.strip():
                     st.session_state.pending_events.append({
                         "时间": new_time.strip(),
-                        "事件描述": new_desc.strip()
+                        "事件标题": new_title.strip(),
+                        "事件内容": new_content.strip()
                     })
                     st.rerun()
                 else:
-                    st.warning("填写不完整")
+                    st.warning("时间和标题必填")
         
         if st.session_state.pending_events:
             st.markdown("**📋 待提交事件列表**")
             for idx, event in enumerate(st.session_state.pending_events):
-                col1, col2, col3 = st.columns([1.2, 2.5, 0.8])
-                with col1:
-                    st.text(event["时间"])
-                with col2:
-                    st.text(event["事件描述"])
-                with col3:
+                c1, c2, c3, c4 = st.columns([1, 1.5, 2.5, 0.8])
+                with c1: st.caption(event.get("时间", ""))
+                with c2: st.caption(event.get("事件标题", event.get("事件描述","")))
+                with c3: 
+                    content_str = event.get("事件内容", "")
+                    st.caption(content_str[:10] + "..." if len(content_str) > 10 else content_str)
+                with c4:
                     if st.button("✕", key=f"del_{idx}"):
                         del st.session_state.pending_events[idx]
                         st.rerun()
@@ -543,7 +538,7 @@ else:
             if st.session_state.pending_events:
                 submitted_events_df = pd.DataFrame(st.session_state.pending_events)
             else:
-                submitted_events_df = pd.DataFrame(columns=["时间", "事件描述"])
+                submitted_events_df = pd.DataFrame(columns=["时间", "事件标题", "事件内容"])
             
             st.session_state.submitted_events = submitted_events_df
             st.session_state.submitted_stats = stats
